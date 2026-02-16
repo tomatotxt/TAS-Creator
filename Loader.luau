@@ -13,24 +13,31 @@ local TAS = {
 
 function TAS:LoadModule(Name)
     local URL = self.BaseURL .. Name .. ".luau"
-    print("[TAS] Loading: " .. Name)
+    print("[TAS] Fetching: " .. Name)
     
     local success, result = pcall(function()
         return game:HttpGet(URL)
     end)
     
     if not success then 
-        warn("[TAS] Failed to fetch " .. Name .. ": " .. tostring(result)) 
+        warn("[TAS] NETWORK ERROR on " .. Name .. ": " .. tostring(result)) 
         return 
     end
     
     local func, err = loadstring(result)
     if not func then 
-        warn("[TAS] Syntax Error in " .. Name .. ": " .. tostring(err)) 
+        warn("[TAS] SYNTAX ERROR in " .. Name .. ": " .. tostring(err)) 
         return 
     end
     
-    self.Services[Name] = func(self)
+    local serviceSuccess, service = pcall(function() return func(self) end)
+    if not serviceSuccess then
+         warn("[TAS] RUNTIME ERROR in " .. Name .. ": " .. tostring(service))
+         return
+    end
+
+    self.Services[Name] = service
+    print("[TAS] Loaded Service: " .. Name)
 end
 
 function TAS:Cleanup()
@@ -53,11 +60,11 @@ end
 -- // BOOT SEQUENCE //
 TAS:LoadModule("State")
 TAS:LoadModule("Serializer")
-TAS:LoadModule("UI_API")    -- NEW: Loads your provided UI code
+TAS:LoadModule("UI_API")
 TAS:LoadModule("Interface")
 TAS:LoadModule("MapEngine")
-TAS:LoadModule("Controller")
+TAS:LoadModule("Controller") -- Controller triggers the logic
 
-print("[TAS] All Modules Loaded Successfully")
+print("[TAS] Boot Complete. Check Game Screen for Alerts.")
 
 return TAS
