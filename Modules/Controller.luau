@@ -19,24 +19,34 @@ return function(TAS)
 
     -- // ANIMATION HOOK //
     function Controller.HookAnimations()
-        repeat
-            local script = LocalPlayer.Character:WaitForChild("Animate")
-            State.AnimEnv = getsenv(script)
-            task.wait()
-        until State.AnimEnv.playAnimation ~= nil
-        State.OriginalPlayAnim = State.AnimEnv.playAnimation
-        State.AnimEnv.playAnimation = function(anim, speed)
-            if not State.IsPaused then
-                State.CurrentAnim = {anim, speed}
-                State.OriginalPlayAnim(State.CurrentAnim[1], State.CurrentAnim[2], LocalPlayer.Character.Humanoid)
+        local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+        local script = char:WaitForChild("Animate", 10)
+        if not script then return end
+        
+        repeat task.wait() until script and script.Parent
+        
+        local success, env = pcall(getsenv, script)
+        if not success then return end
+        
+        State.AnimEnv = env
+        if State.AnimEnv.playAnimation then
+            State.OriginalPlayAnim = State.AnimEnv.playAnimation
+            State.AnimEnv.playAnimation = function(anim, speed)
+                if not State.IsPaused then
+                    State.CurrentAnim = {anim, speed}
+                    State.OriginalPlayAnim(State.CurrentAnim[1], State.CurrentAnim[2], LocalPlayer.Character.Humanoid)
+                end
             end
         end
     end
 
     -- // ACTIONS //
     function Controller.TogglePause()
+        if not LocalPlayer.Character then return end
         State.IsPaused = not State.IsPaused
-        local Root = LocalPlayer.Character.HumanoidRootPart
+        local Root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if not Root then return end
+
         if State.IsPaused then
             State.SavedVelocity = Root.Velocity
             Root.Anchored = true
@@ -52,6 +62,11 @@ return function(TAS)
     end
     
     function Controller.LoadLastSavestate()
+        if #State.Savestates == 0 then 
+            UI.SendAlert("No Savestates!", Color3.fromRGB(255, 0, 0))
+            return 
+        end
+        
         local LastState = State.Savestates[#State.Savestates]
         if LastState then
             local FramePacked = LastState[#LastState]
@@ -76,7 +91,9 @@ return function(TAS)
             Engine.SyncButtonState(Frame.Time, Frame.Time)
             Engine.UpdateMapState(Frame.Time)
             
-            State.OriginalPlayAnim(Frame.Animation[1], Frame.Animation[2], LocalPlayer.Character.Humanoid)
+            if State.OriginalPlayAnim then
+                State.OriginalPlayAnim(Frame.Animation[1], Frame.Animation[2], LocalPlayer.Character.Humanoid)
+            end
             UI.SendAlert("Savestate Loaded", Color3.fromRGB(0, 255, 255))
         end
     end
@@ -136,13 +153,36 @@ return function(TAS)
         if input.KeyCode.Name == "Down" then State.IsPreviewingBackward = false end
     end
 
-    -- // INIT //
+    -- // INIT & STARTUP SEQUENCE //
     table.insert(TAS.Connections, RunService.Heartbeat:Connect(Heartbeat))
     table.insert(TAS.Connections, UserInputService.InputBegan:Connect(InputBegan))
     table.insert(TAS.Connections, UserInputService.InputEnded:Connect(InputEnded))
     
-    -- Trigger Map Setup
-    task.spawn(Engine.SetupMap)
+    -- The Main Thread that waits for the game to start
+    task.spawn(function()
+        UI.SendAlert("TAS Active: Waiting for Game...", Color3.fromRGB(255, 170, 0))
+        print("[TAS] Waiting for Multiplayer folder...")
+        
+        local MP = workspace:WaitForChild("Multiplayer", 10)
+        if not MP then warn("[TAS] Multiplayer folder not found!"); return end
+
+        print("[TAS] Waiting for NewMap...")
+        MP:WaitForChild("NewMap", 9e9) -- Infinite wait until map loads
+        
+        print("[TAS] Waiting for Map rename...")
+        MP:WaitForChild("Map", 9e9) -- Infinite wait until map is ready
+        
+        print("[TAS] Waiting for Player Unanchor...")
+        repeat 
+            task.wait(0.1)
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                if not LocalPlayer.Character.HumanoidRootPart.Anchored then break end
+            end
+        until false
+        
+        print("[TAS] Game Started! Initializing Engine...")
+        Engine.SetupMap()
+    end)
     
     return Controller
 end
