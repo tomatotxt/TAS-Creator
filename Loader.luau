@@ -1,16 +1,15 @@
 --[[ 
     TAS Creator - Modular Loader 
-    Replicates original behavior 1:1
+    FIXED: Forces Core Initialization
 ]]
 
 getgenv().TAS_Active = true 
 
--- // BYPASSES (Must run first) //
+-- // 1. BYPASSES //
 local OldIndex
 OldIndex = hookmetamethod(game, "__index", function(self, key)
     if not checkcaller() then
         if key == "Archivable" then return false end
-        -- Swim Fix
         if getgenv().IsSwimming and key == "Position" and self.Name == "HumanoidRootPart" then
             return Vector3.new(-23, -153, 0)
         end
@@ -18,35 +17,37 @@ OldIndex = hookmetamethod(game, "__index", function(self, key)
     return OldIndex(self, key)
 end)
 
--- Passkey
 pcall(function() game:GetService("ReplicatedStorage").Remote.ReqPasskey:InvokeServer() end)
 
--- // MODULE LOADER //
+-- // 2. MODULE SYSTEM //
 local TAS = {
     Services = {},
-    Connections = {},
     BaseURL = "https://raw.githubusercontent.com/tomatotxt/TAS-Creator/refs/heads/main/Modules/"
 }
 
 function TAS:LoadModule(Name)
     local URL = self.BaseURL .. Name .. ".luau"
-    print("[TAS] Loading: " .. Name)
-    
-    local success, result = pcall(function() return game:HttpGet(URL) end)
-    if not success then return warn("Failed to fetch " .. Name) end
-    
-    local func, err = loadstring(result)
-    if not func then return warn("Syntax Error in " .. Name) end
-    
-    self.Services[Name] = func(self)
+    print("[TAS] Fetching: " .. Name)
+    local s, r = pcall(function() return game:HttpGet(URL) end)
+    if not s then return warn("FAILED TO LOAD: " .. Name) end
+    local f, e = loadstring(r)
+    if not f then return warn("SYNTAX ERROR: " .. Name .. " | " .. tostring(e)) end
+    self.Services[Name] = f(self)
+    print("[TAS] Loaded: " .. Name)
 end
 
--- Load Order matters
+-- // 3. LOAD ORDER //
 TAS:LoadModule("State")
 TAS:LoadModule("Serializer")
 TAS:LoadModule("UI")
-TAS:LoadModule("Core") -- Starts the script
+TAS:LoadModule("Core")
 
-print("TAS Creator: Smart .Changed Recorder Loaded (Modular)")
+-- // 4. FORCE START //
+if TAS.Services.Core and TAS.Services.Core.Init then
+    print("[TAS] Starting Core Engine...")
+    task.spawn(TAS.Services.Core.Init)
+else
+    warn("[TAS] Core Module failed to load properly!")
+end
 
 return TAS
