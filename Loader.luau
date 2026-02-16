@@ -53,6 +53,7 @@ end
 -- // BOOT SEQUENCE //
 TAS:LoadModule("State")
 TAS:LoadModule("Serializer")
+TAS:LoadModule("UI_API")    -- NEW: Loads your provided UI code
 TAS:LoadModule("Interface")
 TAS:LoadModule("MapEngine")
 TAS:LoadModule("Controller")
