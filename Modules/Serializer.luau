@@ -3,11 +3,10 @@ return function(TAS)
     local HttpService = game:GetService("HttpService")
     local Players = game:GetService("Players")
     local LocalPlayer = Players.LocalPlayer
-    
     local State = TAS.Services.State
+    
     local PACK_FORMAT = "d" .. string.rep("f", 28) .. "s"
 
-    -- // UTILITIES //
     function Serializer.GetUUID(part)
         if not part then return nil end
         local id = part:GetAttribute("TAS_UUID")
@@ -17,8 +16,8 @@ return function(TAS)
         end
         return id
     end
-
-    function Serializer.IsRandomString(str)
+    
+    function Serializer.isRandomString(str)
         if #str == 0 then return false end
         for i = 1, #str do
             local ltr = str:sub(i, i)
@@ -31,13 +30,10 @@ return function(TAS)
         local copy = {}
         if type(orig) == 'table' then
             for k, v in pairs(orig) do copy[k] = v end
-        else
-            copy = orig
-        end
+        else copy = orig end
         return copy
     end
 
-    -- // PACKING //
     function Serializer.PackFrame(Time, Vel, CF, CamCF, Anim)
         local animName = Anim[1] or "idle"
         local animSpeed = Anim[2] or 0
@@ -61,7 +57,7 @@ return function(TAS)
         local x, y, z, R00, R01, R02, R10, R11, R12, R20, R21, R22 = Root.CFrame:GetComponents()
         return CFrame.new(x - State.MapX, y - State.MapY + 1000, z - State.MapZ, R00, R01, R02, R10, R11, R12, R20, R21, R22)
     end
-
+    
     function Serializer.CaptureFrameData()
         return Serializer.PackFrame(
             tick() - State.RunStart - State.TimeOffset,
@@ -72,17 +68,13 @@ return function(TAS)
         )
     end
 
-    -- // FILE SAVING //
     function Serializer.SaveRun()
-        local TAS_UI = TAS.Services.Interface
-        
         local PressedCount = 0
         for _, data in pairs(State.ButtonRegistry) do if data.IsPressed then PressedCount = PressedCount + 1 end end
-        if PressedCount < #State.TotalButtons then TAS_UI.SendAlert("Warning: Missing Buttons!", Color3.fromRGB(255, 255, 0)) end
+        if PressedCount < #State.TotalButtons then TAS.Services.UI.SendAlert("Warning: Missing Buttons!", Color3.fromRGB(255, 255, 0)) end
         
         local function Round(n) return math.floor(n * 1000 + 0.5) / 1000 end
         local Export = {}
-        
         local function ProcessFrameList(list)
             for j = 1, #list do
                 local FramePacked = list[j]
@@ -105,14 +97,13 @@ return function(TAS)
                 end
             end
         end
-
         for i = 1, #State.Savestates do ProcessFrameList(State.Savestates[i]) end
         ProcessFrameList(State.Frames)
         
         if not isfolder("Flood-GUI/TAS FILES") then makefolder("Flood-GUI/TAS FILES") end
-        local MapName = State.ClonedMap and State.ClonedMap.Settings:GetAttribute("MapName") or "Unknown"
-        writefile("Flood-GUI/TAS FILES/" .. MapName .. ".json", HttpService:JSONEncode(Export))
-        TAS_UI.SendAlert("Run Saved to Workspace", Color3.fromRGB(0, 255, 0))
+        local mName = State.ClonedMap and State.ClonedMap.Settings:GetAttribute("MapName") or "Unknown"
+        writefile("Flood-GUI/TAS FILES/" .. mName .. ".json", HttpService:JSONEncode(Export))
+        TAS.Services.UI.SendAlert("Run Saved to Workspace", Color3.fromRGB(0, 255, 0))
     end
 
     return Serializer
