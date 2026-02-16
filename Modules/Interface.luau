@@ -4,7 +4,7 @@ return function(TAS)
     -- // DEPENDENCIES //
     local Players = game:GetService("Players")
     local LocalPlayer = Players.LocalPlayer
-    local HttpService = game:GetService("HttpService")
+    local RunService = game:GetService("RunService")
     
     -- // CONFIG //
     local UI_API_URL = "https://raw.githubusercontent.com/tomatotxt/Flood-GUI/refs/heads/testing/TAS/CREATOR/uiapi.luau"
@@ -35,17 +35,17 @@ return function(TAS)
             if NewAlert then
                 pcall(function() NewAlert(msg, color, 1.5, nil) end)
             else
-                -- Fallback to console if game script is inaccessible
-                print("[TAS ALERT]: " .. msg) 
+                -- Fallback to console/warn if game script is inaccessible
+                -- This prevents the script from breaking if alerts fail
+                warn("[TAS ALERT]: " .. tostring(msg)) 
             end
         end
     end
 
     -- // 2. GUI MANAGEMENT //
     function Interface.Create(MapName)
-        if UI_Elements and UI_Elements.ScreenGui and UI_Elements.ScreenGui.Parent then 
-            Interface.Destroy()
-        end
+        -- Cleanup existing UI if present
+        Interface.Destroy()
         
         -- Load external library if not already loaded
         if not UI_Lib then
@@ -53,7 +53,8 @@ return function(TAS)
             if success then
                 UI_Lib = res
             else
-                warn("Failed to load UI API")
+                warn("[TAS] Failed to load UI API from URL")
+                Interface.SendAlert("Failed to load UI API", Color3.fromRGB(255, 0, 0))
                 return
             end
         end
@@ -76,11 +77,12 @@ return function(TAS)
     end
 
     -- // 3. UPDATE LOOP //
-    -- Call this from your Controller's Heartbeat loop
     function Interface.UpdateDisplay()
         if not UI_Elements then return end
         
+        -- Pull state dynamically
         local State = TAS.Services.State
+        if not State then return end
         
         -- Calculate Visual Time
         local RealTime = 0
