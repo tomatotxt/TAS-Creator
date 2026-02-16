@@ -2,32 +2,31 @@ return function(TAS)
     local Interface = {}
     local Players = game:GetService("Players")
     local LocalPlayer = Players.LocalPlayer
-    local TweenService = game:GetService("TweenService")
     
-    -- // ALERT SYSTEM //
-    local NewAlert = nil
-    local function SetupAlerts()
-        local GameScript = LocalPlayer.PlayerScripts:WaitForChild("CL_MAIN_GameScript", 5)
+    -- // 1. ALERT SYSTEM (DIRECT ACCESS) //
+    function Interface.SendAlert(msg, color)
+        -- Direct access as requested: getsenv(CL_MAIN_GameScript).newAlert
+        local GameScript = LocalPlayer.PlayerScripts:FindFirstChild("CL_MAIN_GameScript")
+        
         if GameScript then
             local success, env = pcall(getsenv, GameScript)
-            if success and env.newAlert then NewAlert = env.newAlert end
+            if success and env and env.newAlert then
+                -- Call it immediately
+                pcall(function() 
+                    env.newAlert(msg, color, 1.5, nil) 
+                end)
+                return
+            end
         end
-    end
-    SetupAlerts()
-
-    function Interface.SendAlert(msg, color)
-        if NewAlert then
-            pcall(function() NewAlert(msg, color, 1.5, nil) end)
-        else
-            SetupAlerts()
-            if NewAlert then pcall(function() NewAlert(msg, color, 1.5, nil) end)
-            else warn("[TAS ALERT] " .. tostring(msg)) end
-        end
+        
+        -- Fallback to console if GameScript isn't loaded yet (e.g. loading screen)
+        warn("[TAS ALERT]: " .. tostring(msg))
     end
     
+    -- Test it immediately
     Interface.SendAlert("TAS Creator Initialized", Color3.fromRGB(183, 0, 255))
 
-    -- // UI LIBRARY (EMBEDDED) //
+    -- // 2. UI LIBRARY //
     local TAS_UI = {}
     local THEME = {
         Background = Color3.fromRGB(25, 25, 30), Stroke = Color3.fromRGB(60, 60, 70),
@@ -130,7 +129,7 @@ return function(TAS)
         return { ScreenGui = ScreenGui, TimeText = TimeText, SavestatesCount = SavestatesCount, FrameCount = FrameCount, StatusText = StatusBadge, MapEventInfo = MapEventInfo }
     end
 
-    -- // UI INTERFACE METHODS //
+    -- // 3. UI INTERFACE METHODS //
     local UI_Elements = nil
     
     function Interface.LoadUI(MapName)
