@@ -4,15 +4,16 @@ return function(TAS)
         Run = game:GetService("RunService"),
         Input = game:GetService("UserInputService"),
         Lighting = game:GetService("Lighting"),
-        Players = game:GetService("Players")
+        Players = game:GetService("Players"),
+        ReplicatedStorage = game:GetService("ReplicatedStorage")
     }
     local LocalPlayer = Services.Players.LocalPlayer
     
     local State = TAS.Services.State
     local UI = TAS.Services.UI
     local Serializer = TAS.Services.Serializer
-    
-    -- // MAP & ENGINE LOGIC //
+
+    -- // 1. CORE FUNCTIONS //
     function Core.CaptureLighting()
         State.SavedLighting.Props = {
             Ambient = Services.Lighting.Ambient, OutdoorAmbient = Services.Lighting.OutdoorAmbient, 
@@ -68,24 +69,47 @@ return function(TAS)
             else data.SelectionBox.Color3 = (data.Order ~= 999) and Color3.fromRGB(255, 140, 0) or Color3.fromRGB(255, 140, 0) end
         end
     end
-    
+
+    function Core.HookAnimations()
+        local script = LocalPlayer.Character:WaitForChild("Animate", 10)
+        if not script then return end
+        local success, env = pcall(getsenv, script)
+        if success then
+            State.AnimEnv = env
+            State.OriginalPlayAnim = State.AnimEnv.playAnimation
+            State.AnimEnv.playAnimation = function(anim, speed)
+                if not State.IsPaused then
+                    State.CurrentAnim = {anim, speed}
+                    State.OriginalPlayAnim(State.CurrentAnim[1], State.CurrentAnim[2], LocalPlayer.Character.Humanoid)
+                end
+            end
+        end
+    end
+
+    -- // 2. MAP SETUP & GODMODE //
     function Core.SetupMap()
         local MP = workspace:WaitForChild("Multiplayer")
-        local LiveMap = MP:WaitForChild("Map", 9e9)
+        local LiveMap = MP:WaitForChild("Map", 10)
+        
+        if not LiveMap then 
+            UI.SendAlert("Error: Map not found!", Color3.fromRGB(255, 0, 0))
+            return 
+        end
+        
         local MapName = LiveMap:FindFirstChild("Settings") and LiveMap.Settings:GetAttribute("MapName") or "Unknown"
-        UI.SendAlert("Map: " .. MapName, Color3.fromRGB(0, 255, 255))
+        UI.SendAlert("Initializing: " .. MapName, Color3.fromRGB(0, 255, 255))
         
         LiveMap.PrimaryPart = LiveMap:FindFirstChild("Spawn", true) or LiveMap:FindFirstChild("Part", true)
         Core.CaptureLighting()
         
-        -- Scanning
+        -- SCANNING
         for _, d in ipairs(LiveMap:GetDescendants()) do 
             if d:IsA("BasePart") or d:IsA("Decal") or d:IsA("Texture") then Serializer.GetUUID(d) end
             d.Archivable = true 
         end
         State.ClonedMap = LiveMap:Clone(); State.ClonedMap.Parent = nil
         
-        -- Recorder
+        -- RECORDER
         local Recording = true
         local StartTime = os.clock()
         local Recorders = {}
@@ -94,7 +118,6 @@ return function(TAS)
             local id = Serializer.GetUUID(Part)
             if not id then return end
             State.MapRecorderCache[Part] = {}
-            -- Simple CFrame/Transparency/etc tracking
             local props = {CFrame=true, Transparency=true, CanCollide=true, Anchored=true}
             for p, _ in pairs(props) do pcall(function() State.MapRecorderCache[Part][p] = Part[p] end) end
             
@@ -113,7 +136,7 @@ return function(TAS)
         end
         for _, d in ipairs(LiveMap:GetDescendants()) do if d:IsA("BasePart") then Track(d) end end
         
-        -- God Mode Farm
+        -- GODMODE & BUTTONS
         local Buttons = {}
         for _, v in pairs(LiveMap:GetDescendants()) do
              if v:IsA("Model") and Serializer.isRandomString(v.Name) then
@@ -128,9 +151,10 @@ return function(TAS)
         local Hum = Char:WaitForChild("Humanoid")
         local Root = Char:WaitForChild("HumanoidRootPart")
         
-        local GodCon = Services.Run.RenderStepped:Connect(function() Hum.Health = 99999 end)
+        local GodCon = Services.Run.RenderStepped:Connect(function() if Hum then Hum.Health = 99999 end end)
         for _,v in pairs(Char:GetChildren()) do if v:IsA("BasePart") then v.CanCollide=false end end
         
+        -- FARM LOOP
         local LastBtn = nil
         while Recording and LiveMap.Parent and Hum.Health > 0 do
             Hum.Jump = true
@@ -155,19 +179,21 @@ return function(TAS)
             Services.Run.Heartbeat:Wait()
         end
         
+        -- CLEANUP RECORDING
         Recording = false; GodCon:Disconnect(); for _,r in pairs(Recorders) do r:Disconnect() end
         if LiveMap then LiveMap:Destroy() end
         State.ClonedMap.Parent = workspace
         
-        -- Restore Cloned Map
+        -- RESTORE
         State.MapUUIDs = {}
         for _, d in ipairs(State.ClonedMap:GetDescendants()) do
             local id = d:GetAttribute("TAS_UUID"); if id then State.MapUUIDs[id] = d end
         end
         for _, Ev in ipairs(State.MapEvents) do Ev.Instance = State.MapUUIDs[Ev.UUID] end
         
-        -- Reset Player
+        -- RESPAWN & FREEZE
         LocalPlayer.Character:BreakJoints()
+        UI.SendAlert("Respawning...", Color3.fromRGB(255, 255, 0))
         LocalPlayer.CharacterAdded:Wait()
         Char = LocalPlayer.Character
         task.wait(1)
@@ -183,11 +209,12 @@ return function(TAS)
         Char.Humanoid.WalkSpeed = 20
         Char.Humanoid.JumpPower = 50
         
+        -- START ENGINE
         State.RunStart = tick(); State.PauseStart = tick()
         Core.HookAnimations()
         UI.LoadUI(MapName)
         
-        -- Register Cloned Buttons
+        -- REGISTER BUTTONS TO UI
         State.ButtonRegistry = {}; local Checked = {}
         local function RegBtn(b)
             if not b or Checked[b] then return end; Checked[b]=true
@@ -211,21 +238,13 @@ return function(TAS)
         UI.SendAlert("Map Ready", Color3.fromRGB(0, 255, 0))
     end
     
-    function Core.HookAnimations()
-        local script = LocalPlayer.Character:WaitForChild("Animate")
-        State.AnimEnv = getsenv(script)
-        State.OriginalPlayAnim = State.AnimEnv.playAnimation
-        State.AnimEnv.playAnimation = function(anim, speed)
-            if not State.IsPaused then
-                State.CurrentAnim = {anim, speed}
-                State.OriginalPlayAnim(State.CurrentAnim[1], State.CurrentAnim[2], LocalPlayer.Character.Humanoid)
-            end
-        end
-    end
-
+    -- // 3. CONTROLS //
     function Core.TogglePause()
+        if not LocalPlayer.Character then return end
         State.IsPaused = not State.IsPaused
-        local Root = LocalPlayer.Character.HumanoidRootPart
+        local Root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        if not Root then return end
+        
         if State.IsPaused then
             State.SavedVelocity = Root.Velocity; Root.Anchored = true; State.PauseStart = tick()
             UI.SendAlert("Paused", Color3.fromRGB(255, 255, 0))
@@ -237,7 +256,9 @@ return function(TAS)
     
     function Core.LoadLastSavestate()
         if #State.Savestates == 0 then return UI.SendAlert("No States", Color3.fromRGB(255,0,0)) end
-        local Frame = Serializer.UnpackFrame(State.Savestates[#State.Savestates][#State.Savestates[#State.Savestates]])
+        local FramePacked = State.Savestates[#State.Savestates][#State.Savestates[#State.Savestates]]
+        local Frame = Serializer.UnpackFrame(FramePacked)
+        
         State.Frames = {}; State.IsPaused = true; State.PreviewOffset = 0
         local Root = LocalPlayer.Character.HumanoidRootPart
         Root.Anchored = true; Root.CFrame = Frame.CFrame + Vector3.new(State.MapX, State.MapY-1000, State.MapZ)
@@ -245,11 +266,13 @@ return function(TAS)
         workspace.CurrentCamera.CFrame = Frame.CameraCFrame
         State.PauseStart = tick(); State.RunStart = tick() - Frame.Time; State.TimeOffset = 0
         Core.SyncButtonState(Frame.Time, Frame.Time); Core.UpdateMapState(Frame.Time)
-        State.OriginalPlayAnim(Frame.Animation[1], Frame.Animation[2], LocalPlayer.Character.Humanoid)
+        if State.OriginalPlayAnim then
+            State.OriginalPlayAnim(Frame.Animation[1], Frame.Animation[2], LocalPlayer.Character.Humanoid)
+        end
         UI.SendAlert("Loaded State", Color3.fromRGB(0, 255, 255))
     end
     
-    -- // CONNECTIONS //
+    -- // 4. LOOPS & BINDS //
     table.insert(TAS.Connections, Services.Run.Heartbeat:Connect(function(dt)
         if not getgenv().TAS_Active or not State.RunStart then return end
         Core.EnforceLighting()
@@ -271,6 +294,7 @@ return function(TAS)
         local k = i.KeyCode.Name
         if k == "CapsLock" then Core.TogglePause()
         elseif k == "One" then table.insert(State.Savestates, Serializer.DeepCopy(State.Frames)); State.Frames={}; UI.SendAlert("Saved State", Color3.fromRGB(0,255,0))
+        elseif k == "Two" then table.remove(State.Savestates); UI.SendAlert("Removed State", Color3.fromRGB(255,0,0))
         elseif k == "Three" then task.spawn(Core.LoadLastSavestate)
         elseif k == "Six" then Serializer.SaveRun()
         elseif k == "Up" then State.IsPreviewingForward = true
@@ -283,13 +307,27 @@ return function(TAS)
         if i.KeyCode.Name == "Down" then State.IsPreviewingBackward = false end
     end))
 
-    -- STARTUP WAIT
+    -- // 5. STARTUP CHECK //
     task.spawn(function()
-        UI.SendAlert("Waiting for game...", Color3.fromRGB(255, 170, 0))
-        workspace:WaitForChild("Multiplayer"):WaitForChild("NewMap", 9e9)
-        workspace:WaitForChild("Multiplayer"):WaitForChild("Map", 9e9)
-        repeat task.wait() until LocalPlayer.Character.HumanoidRootPart.Anchored == false
-        Core.SetupMap()
+        print("TAS: Checking Game State...")
+        local MP = workspace:WaitForChild("Multiplayer", 10)
+        
+        -- Check if map is ALREADY loaded
+        if MP and MP:FindFirstChild("Map") then
+             print("TAS: Map found immediately! Starting...")
+             UI.SendAlert("Map found! Starting...", Color3.fromRGB(0,255,0))
+             -- We need to wait for player to spawn if they just joined
+             if not LocalPlayer.Character then LocalPlayer.CharacterAdded:Wait() end
+             repeat task.wait(0.5) until LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+             Core.SetupMap()
+        else
+             print("TAS: Waiting for New Round...")
+             UI.SendAlert("Waiting for next round...", Color3.fromRGB(255, 170, 0))
+             MP:WaitForChild("NewMap", 9e9)
+             MP:WaitForChild("Map", 9e9)
+             repeat task.wait() until LocalPlayer.Character.HumanoidRootPart.Anchored == false
+             Core.SetupMap()
+        end
     end)
     
     return Core
