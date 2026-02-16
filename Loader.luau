@@ -1,10 +1,27 @@
 --[[ 
     TAS Creator - Modular Loader 
-    Entry Point
+    Replicates original behavior 1:1
 ]]
 
 getgenv().TAS_Active = true 
 
+-- // BYPASSES (Must run first) //
+local OldIndex
+OldIndex = hookmetamethod(game, "__index", function(self, key)
+    if not checkcaller() then
+        if key == "Archivable" then return false end
+        -- Swim Fix
+        if getgenv().IsSwimming and key == "Position" and self.Name == "HumanoidRootPart" then
+            return Vector3.new(-23, -153, 0)
+        end
+    end
+    return OldIndex(self, key)
+end)
+
+-- Passkey
+pcall(function() game:GetService("ReplicatedStorage").Remote.ReqPasskey:InvokeServer() end)
+
+-- // MODULE LOADER //
 local TAS = {
     Services = {},
     Connections = {},
@@ -13,58 +30,23 @@ local TAS = {
 
 function TAS:LoadModule(Name)
     local URL = self.BaseURL .. Name .. ".luau"
-    print("[TAS] Fetching: " .. Name)
+    print("[TAS] Loading: " .. Name)
     
-    local success, result = pcall(function()
-        return game:HttpGet(URL)
-    end)
-    
-    if not success then 
-        warn("[TAS] NETWORK ERROR on " .. Name .. ": " .. tostring(result)) 
-        return 
-    end
+    local success, result = pcall(function() return game:HttpGet(URL) end)
+    if not success then return warn("Failed to fetch " .. Name) end
     
     local func, err = loadstring(result)
-    if not func then 
-        warn("[TAS] SYNTAX ERROR in " .. Name .. ": " .. tostring(err)) 
-        return 
-    end
+    if not func then return warn("Syntax Error in " .. Name) end
     
-    local serviceSuccess, service = pcall(function() return func(self) end)
-    if not serviceSuccess then
-         warn("[TAS] RUNTIME ERROR in " .. Name .. ": " .. tostring(service))
-         return
-    end
-
-    self.Services[Name] = service
-    print("[TAS] Loaded Service: " .. Name)
+    self.Services[Name] = func(self)
 end
 
-function TAS:Cleanup()
-    getgenv().TAS_Active = false
-    for _, con in pairs(self.Connections) do
-        if con then con:Disconnect() end
-    end
-    
-    if self.Services.Interface and self.Services.Interface.Destroy then
-        self.Services.Interface.Destroy()
-    end
-    
-    if self.Services.MapEngine and self.Services.MapEngine.Cleanup then
-        self.Services.MapEngine.Cleanup()
-    end
-    
-    print("[TAS] System Unloaded")
-end
-
--- // BOOT SEQUENCE //
+-- Load Order matters
 TAS:LoadModule("State")
 TAS:LoadModule("Serializer")
-TAS:LoadModule("UI_API")
-TAS:LoadModule("Interface")
-TAS:LoadModule("MapEngine")
-TAS:LoadModule("Controller") -- Controller triggers the logic
+TAS:LoadModule("UI")
+TAS:LoadModule("Core") -- Starts the script
 
-print("[TAS] Boot Complete. Check Game Screen for Alerts.")
+print("TAS Creator: Smart .Changed Recorder Loaded (Modular)")
 
 return TAS
