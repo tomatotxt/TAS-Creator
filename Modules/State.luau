@@ -1,5 +1,9 @@
 return function(TAS)
     local State = {
+        -- Configuration
+        TARGET_FPS = 60,
+        RECORD_INTERVAL = 1/60,
+        
         -- Playback Flags
         IsPaused = true,
         EnvPaused = false,
@@ -10,45 +14,50 @@ return function(TAS)
         IsViewingTAS = false,
         AutoSaved = false,
         AutoResetEnv = false,
-        IsSwimming = false,
-
-        -- Time & Frame Data
+        
+        -- Timing
         TimeOffset = 0,
         PreviewOffset = 0,
         PauseStart = 0,
-        RunStart = 0,
+        RunStart = nil, -- Starts as nil
         RecordAccumulator = 0,
-        TARGET_FPS = 60,
-        RECORD_INTERVAL = 1/60,
         
-        -- Data Stores
-        CurrentAnim = {"idle", 0},
+        -- Data Containers
         Savestates = {},
         Frames = {},
         MapEvents = {},
+        MapRecorderCache = {},
+        
+        -- Map & Physics
+        ClonedMap = nil,
+        RopeTable = nil,
+        MapOffset = nil,
+        MapPos = nil,
+        MapX = 0, MapY = 0, MapZ = 0,
         MapUUIDs = {},
+        WaterParts = {},
+        SavedVelocity = Vector3.new(0, 0, 0),
+        
+        -- Button Logic
         RecordedButtonSequence = {},
         OrderedButtonRegistry = {},
         ButtonRegistry = {},
         TotalButtons = {},
-        WaterParts = {},
-        
-        -- Map & Physics
-        SavedVelocity = Vector3.new(0,0,0),
-        ClonedMap = nil,
-        RopeTable = nil,
-        MapOffset = CFrame.new(),
-        MapX = 0, 
-        MapY = 0, 
-        MapZ = 0,
+        ButtonPressTimings = {},
         
         -- Lighting
         SavedLighting = { Props = {}, Children = {} },
         LightingCaptured = false,
         
-        -- Animation Hooks
+        -- Animation
+        CurrentAnim = {},
         OriginalPlayAnim = nil,
-        AnimEnv = nil
+        AnimEnv = nil,
+        LastTASAnim = nil,
+        IsTASSliding = false,
+        
+        -- Loop Control
+        PlaybackIndex = 1
     }
     return State
 end
