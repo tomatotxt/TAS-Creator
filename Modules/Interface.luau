@@ -6,9 +6,6 @@ return function(TAS)
     local LocalPlayer = Players.LocalPlayer
     local RunService = game:GetService("RunService")
     
-    -- // CONFIG //
-    local UI_API_URL = "https://raw.githubusercontent.com/tomatotxt/Flood-GUI/refs/heads/testing/TAS/CREATOR/uiapi.luau"
-    
     -- // INTERNAL VARIABLES //
     local UI_Lib = nil
     local UI_Elements = nil
@@ -35,8 +32,6 @@ return function(TAS)
             if NewAlert then
                 pcall(function() NewAlert(msg, color, 1.5, nil) end)
             else
-                -- Fallback to console/warn if game script is inaccessible
-                -- This prevents the script from breaking if alerts fail
                 warn("[TAS ALERT]: " .. tostring(msg)) 
             end
         end
@@ -47,14 +42,13 @@ return function(TAS)
         -- Cleanup existing UI if present
         Interface.Destroy()
         
-        -- Load external library if not already loaded
+        -- Load Library from Services
         if not UI_Lib then
-            local success, res = pcall(function() return loadstring(game:HttpGet(UI_API_URL))() end)
-            if success then
-                UI_Lib = res
+            if TAS.Services.UI_API then
+                UI_Lib = TAS.Services.UI_API
             else
-                warn("[TAS] Failed to load UI API from URL")
-                Interface.SendAlert("Failed to load UI API", Color3.fromRGB(255, 0, 0))
+                warn("[TAS] UI_API Service not found!")
+                Interface.SendAlert("UI Service Missing", Color3.fromRGB(255, 0, 0))
                 return
             end
         end
