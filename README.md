@@ -83,7 +83,7 @@ The script handles files in the `TAS_Recorder` folder. Data is heavily compresse
 
 *   **Original Concept:** Tomato -> https://scriptblox.com/u/Tomato
 *   **Modifications:** Ali -> https://scriptblox.com/u/Ali_
-*   **Enhanced Engine & Math Corrections:**
+*   **Enhanced Engine & Math Corrections: [Tomato -> AI Assisted] **
 
 ---
 
