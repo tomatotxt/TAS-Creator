@@ -1,15 +1,7 @@
---[[
-	TAS Recorder Enhanced (CameraType Removed)
-	- Playback: Unanchored + Zero Velocity.
-	- Camera: Default Behavior (Scriptable mode removed).
-	- Animation: Gatekeeper Hook.
-	- Recording: 60 FPS Cap.
-]]
-
 --// PREVENT DUPLICATES //--
 if getgenv().TAS_Recorder_Running then
 	pcall(function() getgenv().TAS_Recorder_Disconnect() end)
-	wait(0.2)
+	task.wait(0.2)
 end
 getgenv().TAS_Recorder_Running = true
 
@@ -20,7 +12,6 @@ local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local StarterGui = game:GetService("StarterGui")
-local MarketplaceService = game:GetService("MarketplaceService")
 
 --// LOCAL PLAYER //--
 local LocalPlayer = Players.LocalPlayer
@@ -31,70 +22,13 @@ local function round(num)
 	return math.floor(num * 1000 + 0.5) / 1000
 end
 
---// ANIMATION SYSTEM (GATEKEEPER) //--
-local AnimateEnv
-local OriginalPlayAnim
-local FrameAnimBuffer = {} 
-
--- State Flags
-getgenv().TAS_IsRecording = false 
-getgenv().TAS_IsPlaying = false 
-
-local function SetupAnimationHook()
-	local Char = LocalPlayer.Character
-	if not Char then return end
-	
-	local AnimateScript = Char:WaitForChild("Animate", 10)
-	if not AnimateScript then return end
-
-	task.wait(0.2)
-
-	AnimateEnv = nil
-	OriginalPlayAnim = nil
-
-	local SuccessHook, Err = pcall(function()
-		AnimateEnv = getsenv(AnimateScript)
-		OriginalPlayAnim = AnimateEnv.playAnimation
-		
-		-- [[ THE GATEKEEPER HOOK ]]
-		AnimateEnv.playAnimation = function(...)
-			local args = {...}
-			
-			-- 1. RECORDING MODE
-			if getgenv().TAS_IsRecording then
-				pcall(function()
-					local name = args[1]
-					local fade = args[2]
-					if type(name) == "string" then
-						table.insert(FrameAnimBuffer, {N = name, F = fade})
-					end
-				end)
-				return OriginalPlayAnim(...)
-			
-			-- 2. PLAYBACK MODE (Block Game Script)
-			elseif getgenv().TAS_IsPlaying then
-				return 
-				
-			-- 3. NORMAL MODE
-			else
-				if OriginalPlayAnim then
-					return OriginalPlayAnim(...)
-				end
-			end
+local function GetPriorityEnum(name)
+	for _, enumItem in ipairs(Enum.AnimationPriority:GetEnumItems()) do
+		if enumItem.Name == name then
+			return enumItem
 		end
-	end)
-
-	if not SuccessHook then
-		warn("TAS Warning: Could not hook Animate script.")
 	end
-end
-
-local function PlayRecordedAnim(animName, transitionTime)
-	if AnimateEnv and OriginalPlayAnim and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Humanoid") then
-		pcall(function()
-			OriginalPlayAnim(animName, transitionTime, LocalPlayer.Character.Humanoid)
-		end)
-	end
+	return Enum.AnimationPriority.Action
 end
 
 --// CONFIGURATION //--
@@ -128,6 +62,14 @@ local DebugView = false
 local OriginalVisuals = {} 
 local LastRecordTime = 0 
 
+-- Unique Track Tracking
+local RecTrackCache = setmetatable({}, {__mode = "k"})
+local RecTrackCounter = 0
+
+-- State Flags
+getgenv().TAS_IsRecording = false 
+getgenv().TAS_IsPlaying = false 
+
 --// GUI OBJECTS //--
 local HUD
 local FrameCountLabel, SavestatesCountLabel, TimeTextLabel, TASNameBox, CapLockPauseLabel, KeyBindFrame, MainFrame
@@ -135,11 +77,13 @@ local FrameCountLabel, SavestatesCountLabel, TimeTextLabel, TASNameBox, CapLockP
 --// CONNECTIONS //--
 local Connections = {}
 local CharConnections = {} 
+local PlaybackTracks = {} 
 
 --// HELPER FUNCTIONS //--
-
 local function notify(text, title, dur)
-	StarterGui:SetCore("SendNotification", {Title = title or "TAS Recorder", Text = text or "", Duration = dur or 3})
+	pcall(function()
+		StarterGui:SetCore("SendNotification", {Title = title or "TAS Recorder", Text = text or "", Duration = dur or 3})
+	end)
 end
 
 local function makeDraggable(guiObject)
@@ -168,21 +112,33 @@ local function updateStatusColor()
 end
 
 --// DEBUG VIEW LOGIC //--
-
 local function ToggleDebugView()
 	DebugView = not DebugView
 	if DebugView then
 		notify("Debug View: Enabled", "TAS Tools")
 		OriginalVisuals = {}
-		for _, v in ipairs(workspace:GetDescendants()) do
+		for _, v in ipairs(Workspace:GetDescendants()) do
 			if v:IsA("BasePart") and not v:IsDescendantOf(LocalPlayer.Character) then
-				OriginalVisuals[v] = {Color = v.Color, Transparency = v.Transparency}
+				rawset(OriginalVisuals, v, {Color = v.Color, Transparency = v.Transparency})
+				
+				-- Default grey shade 
 				local shade = math.random(30, 90) / 100
 				v.Color = Color3.new(shade, shade, shade)
+				
 				if v.Transparency == 1 then v.Transparency = 0.5 end
 				if v.CanCollide == false then v.Transparency = 0.9 end
-				if v:FindFirstChild("TouchInterest") then v.Color = Color3.new(1, 0, 0); v.Transparency = 0 end
-				if math.min(v.Size.X, v.Size.Y, v.Size.Z) <= 1.1 and not v:FindFirstChild("TouchInterest") then v.Color = Color3.fromRGB(0, 255, 255) end
+				
+				-- Check for TouchInterest first (Killbricks/Teleporters)
+				if v:FindFirstChild("TouchInterest") then 
+					local rShade = math.random(120, 255) / 255
+					v.Color = Color3.new(rShade, 0, 0)
+					v.Transparency = 0 
+					
+				-- Check for thin parts (<= 1 stud)
+				elseif math.min(v.Size.X, v.Size.Y, v.Size.Z) <= 1 then 
+					local cShade = math.random(120, 255) / 255
+					v.Color = Color3.new(0, cShade, cShade)
+				end
 			end
 		end
 	else
@@ -195,49 +151,69 @@ local function ToggleDebugView()
 end
 
 --// DATA CAPTURE //--
-
-local function getCurrentCFrame()
-	return (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")) and LocalPlayer.Character.HumanoidRootPart.CFrame or CFrame.new()
+local function GetActiveAnimations()
+	local anims = {}
+	local char = LocalPlayer.Character
+	if char then
+		local hum = char:FindFirstChild("Humanoid")
+		local animator = hum and hum:FindFirstChildOfClass("Animator")
+		if animator then
+			for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+				if track.Animation and track.Animation.AnimationId ~= "" then
+					
+					local uID = rawget(RecTrackCache, track)
+					if not uID then
+						RecTrackCounter = RecTrackCounter + 1
+						uID = RecTrackCounter
+						rawset(RecTrackCache, track, uID)
+					end
+					
+					table.insert(anims, {
+						Id = track.Animation.AnimationId,
+						T = round(track.TimePosition),
+						W = round(track.WeightCurrent),
+						P = track.Priority.Name,
+						S = round(track.Speed),
+						U = uID 
+					})
+				end
+			end
+		end
+	end
+	return anims
 end
 
-local function getCurrentVelocity()
-	return (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")) and LocalPlayer.Character.HumanoidRootPart.Velocity or Vector3.new()
-end
-
-local function getCurrentCameraCFrame()
-	return Workspace.CurrentCamera.CFrame
-end
-
-local function ReturnPlayerInfo(animEvents)
-	local cf = getCurrentCFrame()
-	local camCf = getCurrentCameraCFrame()
-	local vel = getCurrentVelocity()
+local function ReturnPlayerInfo()
+	local char = LocalPlayer.Character
+	local root = char and char:FindFirstChild("HumanoidRootPart")
+	
+	local cf = root and root.CFrame or CFrame.new()
+	local vel = root and root.Velocity or Vector3.zero
+	local camCf = Workspace.CurrentCamera.CFrame
 	
 	local cfComps = {cf:GetComponents()}
-	for i = 1, #cfComps do cfComps[i] = round(cfComps[i]) end
+	for index, value in ipairs(cfComps) do 
+		rawset(cfComps, index, round(value)) 
+	end
 	
 	local camComps = {camCf:GetComponents()}
-	for i = 1, #camComps do camComps[i] = round(camComps[i]) end
+	for index, value in ipairs(camComps) do 
+		rawset(camComps, index, round(value)) 
+	end
 
-	local frameData = {
+	return {
 		CF = cfComps,
 		CCF = camComps,
 		V = {round(vel.X), round(vel.Y), round(vel.Z)},
-		T = round(tick() - TimeStart - TimePaused)
+		T = round(tick() - TimeStart - TimePaused),
+		A = GetActiveAnimations()
 	}
-
-	if animEvents and #animEvents > 0 then
-		frameData.AE = animEvents
-	end
-
-	return frameData
 end
 
 --// GUI SETUP //--
-
 local function UpdateGUIText()
-	if SavestatesCountLabel then SavestatesCountLabel.Text = "Savestates: " .. #Savestates end
-	if FrameCountLabel then FrameCountLabel.Text = "Frames: " .. #PlayerInfo end
+	if SavestatesCountLabel then SavestatesCountLabel.Text = "Savestates: " .. tostring(#Savestates) end
+	if FrameCountLabel then FrameCountLabel.Text = "Frames: " .. tostring(#PlayerInfo) end
 end
 
 local function FormatTime(TimeValue)
@@ -381,20 +357,18 @@ local function SetUpGui()
 end
 
 --// STATE MANAGEMENT //--
-
 local function SetCharacterState(InfoState)
 	if not LocalPlayer.Character then return end
 	local Root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 	if not Root then return end
 
-	-- Decompress
 	local charCF = CFrame.new(unpack(InfoState.CF))
 	local camCF = CFrame.new(unpack(InfoState.CCF))
 	local vel = Vector3.new(unpack(InfoState.V))
 
 	Root.CFrame = charCF
 	Root.Velocity = vel
-	Root.RotVelocity = Vector3.new()
+	Root.RotVelocity = Vector3.zero
 	Workspace.CurrentCamera.CFrame = camCF
 end
 
@@ -404,9 +378,7 @@ local function UserPauseToggle()
 	getgenv().TAS_IsRecording = not Pause
 	
 	local Root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
-	if Root then
-		Root.Anchored = Pause
-	end
+	if Root then Root.Anchored = Pause end
 
 	if Pause then
 		TimePauseHolder = tick()
@@ -422,7 +394,6 @@ local function UserPauseToggle()
 end
 
 --// RECORDING FUNCTIONS //--
-
 local function AddSavestate()
 	local CurrentPlayerInfoCopy = HttpService:JSONDecode(HttpService:JSONEncode(PlayerInfo))
 	table.insert(Savestates, CurrentPlayerInfoCopy)
@@ -434,15 +405,17 @@ end
 local function RemoveSavestate()
 	if #Savestates > 1 then
 		table.remove(Savestates)
-		local lastSegment = Savestates[#Savestates]
+		local lastSegment = rawget(Savestates, #Savestates)
 		if lastSegment and #lastSegment > 0 then
-			local lastFrame = lastSegment[#lastSegment]
+			local lastFrame = rawget(lastSegment, #lastSegment)
 			PlayerInfo = {}
 			Pause = true
 			getgenv().TAS_IsRecording = false
-			TimePauseHolder = tick()
+			
 			TimeStart = tick() - lastFrame.T
 			TimePaused = 0
+			TimePauseHolder = tick() 
+			
 			SetCharacterState(lastFrame)
 			UpdateTimeGUI()
 		end
@@ -458,13 +431,16 @@ local function EnterSavestate()
 	if #Savestates > 0 then
 		local lastSegment = table.remove(Savestates)
 		PlayerInfo = lastSegment
-		local lastFrame = PlayerInfo[#PlayerInfo]
+		local lastFrame = rawget(PlayerInfo, #PlayerInfo)
 		if lastFrame then
 			Pause = true
 			getgenv().TAS_IsRecording = false
 			SetCharacterState(lastFrame)
-			TimePaused = 0
+			
 			TimeStart = tick() - lastFrame.T
+			TimePaused = 0
+			TimePauseHolder = tick()
+			
 			UpdateGUIText()
 			UpdateTimeGUI()
 			updateStatusColor()
@@ -476,57 +452,59 @@ local function EnterSavestate()
 end
 
 local function BackSavestate()
-	if #Savestates > 0 and Savestates[#Savestates] and #Savestates[#Savestates] > 0 then
-		local InfoState = Savestates[#Savestates][#Savestates[#Savestates]]
-		PlayerInfo = {}
-		Pause = true
-		getgenv().TAS_IsRecording = false
-		if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-			LocalPlayer.Character.HumanoidRootPart.Anchored = true
+	if #Savestates > 0 then
+		local lastStateList = rawget(Savestates, #Savestates)
+		if lastStateList and #lastStateList > 0 then
+			local InfoState = rawget(lastStateList, #lastStateList)
+			PlayerInfo = {}
+			Pause = true
+			getgenv().TAS_IsRecording = false
+			if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+				LocalPlayer.Character.HumanoidRootPart.Anchored = true
+			end
+			
+			TimeStart = tick() - InfoState.T
+			TimePaused = 0
+			TimePauseHolder = tick()
+			
+			SetCharacterState(InfoState)
+			updateStatusColor()
+			UpdateTimeGUI()
 		end
-		TimePauseHolder = tick()
-		TimeStart = tick() - InfoState.T
-		TimePaused = 0
-		SetCharacterState(InfoState)
-		updateStatusColor()
-		UpdateTimeGUI()
 	end
 end
 
 local function GoFrameForward()
 	if Pause then
-		getgenv().TAS_IsRecording = true
-		if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-			LocalPlayer.Character.HumanoidRootPart.Anchored = false
-		end
-		RunService.Heartbeat:Wait()
-		RunService.Heartbeat:Wait()
-		if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-			LocalPlayer.Character.HumanoidRootPart.Anchored = true
-		end
-		getgenv().TAS_IsRecording = false
+		local CurrentFrameCount = #PlayerInfo
+		UserPauseToggle()
+		repeat RunService.Heartbeat:Wait() until #PlayerInfo > CurrentFrameCount
+		UserPauseToggle()
 	end
 end
 
 local function GoFrameBack()
 	if not LocalPlayer.Character then return end
 	local TargetFrameInfo = nil
+	
 	if #PlayerInfo > 1 then
-		TargetFrameInfo = PlayerInfo[#PlayerInfo - 1]
-		PlayerInfo[#PlayerInfo] = nil
-	elseif #Savestates > 0 and #Savestates[#Savestates] > 1 then
-		TargetFrameInfo = Savestates[#Savestates][#Savestates[#Savestates] - 1]
-		Savestates[#Savestates][#Savestates[#Savestates]] = nil
+		TargetFrameInfo = rawget(PlayerInfo, #PlayerInfo - 1)
+		rawset(PlayerInfo, #PlayerInfo, nil)
 	end
+
 	if TargetFrameInfo then
 		if not Pause then 
 			Pause = true 
 			getgenv().TAS_IsRecording = false
-			if LocalPlayer.Character.HumanoidRootPart then LocalPlayer.Character.HumanoidRootPart.Anchored = true end
+			if LocalPlayer.Character.HumanoidRootPart then 
+				LocalPlayer.Character.HumanoidRootPart.Anchored = true 
+			end
 		end
-		TimePauseHolder = tick()
+		
 		TimeStart = tick() - TargetFrameInfo.T
 		TimePaused = 0
+		TimePauseHolder = tick()
+		
 		SetCharacterState(TargetFrameInfo)
 		UpdateTimeGUI()
 		UpdateGUIText()
@@ -537,20 +515,19 @@ end
 --// REPEATED INPUT HANDLERS //--
 local heldInputs = {}
 local function handleHold(key, action)
-	heldInputs[key] = true
+	rawset(heldInputs, key, true)
 	action()
 	task.wait(0.2)
-	while heldInputs[key] do
+	while rawget(heldInputs, key) do
 		action()
-		task.wait(0.05)
+		task.wait(1/50)
 	end
 end
 
 --// IO FUNCTIONS //--
-
 local function GetFileName()
 	local rawName = TASNameBox.Text
-	local cleanName = rawName:gsub("[^%w%s%-%_]", ""):gsub("^%s*(.-)%s*$", "%1")
+	local cleanName = rawName:gsub("%p", ""):gsub("^%s*(.-)%s*$", "%1")
 	if cleanName == "" then cleanName = "Untitled" end
 	return cleanName .. ".json"
 end
@@ -579,13 +556,26 @@ local function LoadRun()
 		local content = readfile("TAS_Recorder/" .. fileName)
 		local loadedTAS = HttpService:JSONDecode(content)
 		if type(loadedTAS) ~= "table" then error("Invalid File") end
-		Savestates = loadedTAS[1] or {}
-		PlayerInfo = loadedTAS[2] or {}
-		if #PlayerInfo > 0 or (#Savestates > 0 and #Savestates[#Savestates] > 0) then
+		
+		Savestates = rawget(loadedTAS, 1) or {}
+		PlayerInfo = rawget(loadedTAS, 2) or {}
+		
+		local hasFrames = (#PlayerInfo > 0)
+		if not hasFrames and #Savestates > 0 then
+			local lastList = rawget(Savestates, #Savestates)
+			if lastList and #lastList > 0 then
+				hasFrames = true
+			end
+		end
+
+		if hasFrames then
 			BackSavestate()
 		else
 			TimeStart = tick()
+			TimePaused = 0
+			TimePauseHolder = tick()
 		end
+		
 		UpdateGUIText()
 		UpdateTimeGUI()
 	end)
@@ -598,13 +588,9 @@ local function ViewTASPlayback()
 	
 	local FlatFrames = {}
 	for _, state in ipairs(Savestates) do
-		for _, frame in ipairs(state) do
-			table.insert(FlatFrames, frame)
-		end
+		for _, frame in ipairs(state) do table.insert(FlatFrames, frame) end
 	end
-	for _, frame in ipairs(PlayerInfo) do
-		table.insert(FlatFrames, frame)
-	end
+	for _, frame in ipairs(PlayerInfo) do table.insert(FlatFrames, frame) end
 	
 	if #FlatFrames == 0 then notify("No frames to play!", "Error"); return end
 
@@ -617,13 +603,24 @@ local function ViewTASPlayback()
 	
 	local Character = LocalPlayer.Character
 	local Root = Character and Character:FindFirstChild("HumanoidRootPart")
+	local Humanoid = Character and Character:FindFirstChild("Humanoid")
+	local Animator = Humanoid and Humanoid:FindFirstChildOfClass("Animator")
+
 	if not Root then 
 		ViewingTAS = false
 		getgenv().TAS_IsPlaying = false
 		return 
 	end
-	
-	-- [[ UNANCHOR START ]]
+
+	local animateScript = Character:FindFirstChild("Animate")
+	if animateScript then animateScript.Disabled = true end
+
+	if Animator then
+		for _, track in ipairs(Animator:GetPlayingAnimationTracks()) do
+			track:Stop(0)
+		end
+	end
+
 	Root.Anchored = false 
 	
 	local StartPlay = tick()
@@ -633,24 +630,17 @@ local function ViewTASPlayback()
 	PlayConn = RunService.Heartbeat:Connect(function()
 		local Elapsed = tick() - StartPlay
 		
-		while CurrentIndex < #FlatFrames and FlatFrames[CurrentIndex + 1].T <= Elapsed do
+		while CurrentIndex < #FlatFrames and rawget(FlatFrames, CurrentIndex + 1) and rawget(FlatFrames, CurrentIndex + 1).T <= Elapsed do
 			CurrentIndex = CurrentIndex + 1
-			if FlatFrames[CurrentIndex].AE then
-				for _, event in ipairs(FlatFrames[CurrentIndex].AE) do
-					PlayRecordedAnim(event.N, event.F)
-				end
-			end
 		end
 		
-		local FrameA = FlatFrames[CurrentIndex]
-		local FrameB = FlatFrames[CurrentIndex + 1]
+		local FrameA = rawget(FlatFrames, CurrentIndex)
+		local FrameB = rawget(FlatFrames, CurrentIndex + 1)
 		
 		if FrameB then
 			local Delta = FrameB.T - FrameA.T
 			local Alpha = 0
-			if Delta > 0 then
-				Alpha = (Elapsed - FrameA.T) / Delta
-			end
+			if Delta > 0 then Alpha = (Elapsed - FrameA.T) / Delta end
 			Alpha = math.clamp(Alpha, 0, 1)
 			
 			local cfA = CFrame.new(unpack(FrameA.CF))
@@ -660,19 +650,124 @@ local function ViewTASPlayback()
 			
 			Root.CFrame = cfA:Lerp(cfB, Alpha)
 			Workspace.CurrentCamera.CFrame = camA:Lerp(camB, Alpha)
-			
-			-- [[ UNANCHORED + ZERO VELOCITY ]]
-			-- Replicate position while freezing momentum
-			Root.Anchored = false
 			Root.Velocity = Vector3.zero
 			Root.RotVelocity = Vector3.zero
+
+			if Animator and FrameA.A then
+				local activeIds = {}
+				local mergedAnims = {}
+
+				if FrameA.A then
+					for _, animA in ipairs(FrameA.A) do
+						local pair = {A = animA, B = nil}
+						rawset(mergedAnims, animA.U, pair)
+					end
+				end
+
+				if FrameB.A then
+					for _, animB in ipairs(FrameB.A) do
+						local existing = rawget(mergedAnims, animB.U)
+						if existing then
+							rawset(existing, "B", animB)
+						else
+							local pair = {A = nil, B = animB}
+							rawset(mergedAnims, animB.U, pair)
+						end
+					end
+				end
+
+				for uId, animPair in pairs(mergedAnims) do
+					rawset(activeIds, uId, true)
+					local track = rawget(PlaybackTracks, uId)
+					
+					local dataA = rawget(animPair, "A")
+					local dataB = rawget(animPair, "B")
+					local refData = dataA or dataB
+
+					if not track then
+						local anim = Instance.new("Animation")
+						anim.AnimationId = refData.Id
+						track = Animator:LoadAnimation(anim)
+						rawset(PlaybackTracks, uId, track)
+					end
+
+					if refData.P then
+						track.Priority = GetPriorityEnum(refData.P)
+					end
+
+					local startW = 0
+					local endW = 0
+					local startS = 1
+					local endS = 1
+					
+					if dataA then 
+						startW = dataA.W 
+						startS = dataA.S or 1
+					end
+					if dataB then 
+						endW = dataB.W 
+						endS = dataB.S or 1
+					end
+
+					local targetWeight = startW + (endW - startW) * Alpha
+					local targetSpeed = startS + (endS - startS) * Alpha
+					local targetTime = 0
+
+					if dataA and dataB then
+						if dataB.T >= dataA.T then
+							targetTime = dataA.T + (dataB.T - dataA.T) * Alpha
+						else
+							local len = track.Length
+							if len > 0 then
+								local dist = (len - dataA.T) + dataB.T
+								targetTime = dataA.T + dist * Alpha
+								if targetTime >= len then
+									targetTime = targetTime - len
+								end
+							else
+								targetTime = dataA.T
+							end
+						end
+					elseif dataA then
+						targetTime = dataA.T + Delta * Alpha
+					elseif dataB then
+						targetTime = math.max(0, dataB.T - Delta * (1 - Alpha))
+					end
+
+					if not track.IsPlaying then 
+						track:Play(0, targetWeight, targetSpeed) 
+						track.TimePosition = targetTime
+					else
+						track:AdjustWeight(targetWeight)
+						track:AdjustSpeed(targetSpeed)
+						
+						if math.abs(track.TimePosition - targetTime) > 0.15 then
+							track.TimePosition = targetTime
+						end
+					end
+				end
+				
+				for uId, track in pairs(PlaybackTracks) do
+					if not rawget(activeIds, uId) and track.IsPlaying then 
+						track:Stop(0) 
+					end
+				end
+			end
 		else
 			PlayConn:Disconnect()
 			ViewingTAS = false
 			getgenv().TAS_IsPlaying = false 
 			Pause = true
-			Root.Anchored = true -- Freeze at end
+			Root.Anchored = true
 			
+			if animateScript then animateScript.Disabled = false end
+			for _, track in pairs(PlaybackTracks) do track:Stop(0) end
+			PlaybackTracks = {}
+			
+			if Humanoid then
+				Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+			end
+
 			updateStatusColor()
 			notify("Playback Finished", "TAS")
 		end
@@ -689,23 +784,30 @@ local function CollisionToggler()
 end
 
 --// INITIALIZATION //--
-
 local function DisconnectAll()
 	for _, c in pairs(Connections) do c:Disconnect() end
 	for _, c in pairs(CharConnections) do c:Disconnect() end
 	if HUD then HUD:Destroy() end
 	if DebugView then ToggleDebugView() end
+	
+	local char = LocalPlayer.Character
+	if char then
+		local root = char:FindFirstChild("HumanoidRootPart")
+		if root then root.Anchored = false; root.Velocity = Vector3.zero end
+		local animateScript = char:FindFirstChild("Animate")
+		if animateScript then animateScript.Disabled = false end
+	end
+	
+	for _, track in pairs(PlaybackTracks) do pcall(function() track:Stop(0) end) end
+	PlaybackTracks = {}
+
 	getgenv().TAS_Recorder_Running = false
 	getgenv().TAS_IsRecording = false
 	getgenv().TAS_IsPlaying = false
-	if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
-		LocalPlayer.Character.HumanoidRootPart.Anchored = false
-	end
 	notify("TAS Recorder Unloaded", "TAS")
 end
 getgenv().TAS_Recorder_Disconnect = DisconnectAll
 
---// ROBUST DEATH & CHARACTER LOGIC //--
 local function SetupCharacterConnections(char)
 	for _, c in pairs(CharConnections) do c:Disconnect() end
 	CharConnections = {}
@@ -713,8 +815,6 @@ local function SetupCharacterConnections(char)
 	if not char then return end
 	local hum = char:WaitForChild("Humanoid", 10)
 	if not hum then return end
-	
-	SetupAnimationHook()
 	
 	table.insert(CharConnections, hum.Died:Connect(function()
 		Pause = true
@@ -725,14 +825,16 @@ local function SetupCharacterConnections(char)
 		
 		local newChar = LocalPlayer.CharacterAdded:Wait()
 		local newRoot = newChar:WaitForChild("HumanoidRootPart", 10)
-		
 		task.wait(0.5) 
 		
 		local lastState = nil
 		if #PlayerInfo > 0 then
-			lastState = PlayerInfo[#PlayerInfo]
+			lastState = rawget(PlayerInfo, #PlayerInfo)
 		elseif #Savestates > 0 then
-			lastState = Savestates[#Savestates][#Savestates[#Savestates]]
+			local lastList = rawget(Savestates, #Savestates)
+			if lastList and #lastList > 0 then
+				lastState = rawget(lastList, #lastList)
+			end
 		end
 		
 		if lastState then
@@ -756,33 +858,17 @@ local function Initialize()
 	TimeStart = tick()
 	TimePauseHolder = tick()
 	
-	local initialCF = getCurrentCFrame()
-	local initialCamCF = getCurrentCameraCFrame()
-	local initialVel = Vector3.new()
-	
-	local cfComps = {initialCF:GetComponents()}
-	for i = 1, #cfComps do cfComps[i] = round(cfComps[i]) end
-	
-	local camComps = {initialCamCF:GetComponents()}
-	for i = 1, #camComps do camComps[i] = round(camComps[i]) end
-	
-	table.insert(Savestates, {{
-		CF = cfComps,
-		CCF = camComps,
-		V = {0, 0, 0},
-		T = 0
-	}})
+	local initialData = ReturnPlayerInfo()
+	initialData.T = 0
+	table.insert(Savestates, {initialData})
 	
 	SetUpGui()
 	updateStatusColor()
 	
-	-- Main Recording Loop
 	table.insert(Connections, RunService.Heartbeat:Connect(function(dt)
 		if not Pause and not ViewingTAS then
 			local now = tick()
-			if now - LastRecordTime < (1/60) then
-				return 
-			end
+			if now - LastRecordTime < (1/60) then return end
 			LastRecordTime = now
 
 			if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return end
@@ -790,22 +876,13 @@ local function Initialize()
 
 			local success, err = pcall(function()
 				UpdateTimeGUI()
-				
-				-- Pull animation events from the buffer
-				local animEventsForThisFrame = nil
-				if #FrameAnimBuffer > 0 then
-					animEventsForThisFrame = FrameAnimBuffer
-					FrameAnimBuffer = {} -- Clear buffer immediately
-				end
-				
-				table.insert(PlayerInfo, ReturnPlayerInfo(animEventsForThisFrame))
+				table.insert(PlayerInfo, ReturnPlayerInfo())
 				UpdateGUIText()
 			end)
 			if not success then warn("TAS Recording Glitch:", err) end
 		end
 	end))
 	
-	-- Input Handling
 	table.insert(Connections, UserInputService.InputBegan:Connect(function(Input, Processed)
 		if Processed then return end
 		local Key = Input.KeyCode
@@ -826,10 +903,9 @@ local function Initialize()
 	end))
 	
 	table.insert(Connections, UserInputService.InputEnded:Connect(function(Input)
-		heldInputs[Input.KeyCode] = false
+		rawset(heldInputs, Input.KeyCode, false)
 	end))
 	
-	-- Persist Character Hooks
 	table.insert(Connections, LocalPlayer.CharacterAdded:Connect(SetupCharacterConnections))
 	if LocalPlayer.Character then SetupCharacterConnections(LocalPlayer.Character) end
 	
