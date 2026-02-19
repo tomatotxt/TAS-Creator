@@ -1,8 +1,8 @@
 ***
 
-# TAS Recorder Enhanced
+# TAS Recorder Redux
 
-**TAS Recorder Enhanced** is a high-precision Tool-Assisted Speedrun (TAS) recording and playback utility for Roblox. Built upon the foundation of the original Tomato/Ali recorder, this version has been completely re-engineered from the ground up. It abandons hacky exploit-dependent hooks in favor of native Roblox API integration, resulting in 1:1 animation replication, flawlessly preserved easing curves, procedural physics retention, and advanced map-debugging tools.
+**TAS Recorder Redux** is a high-precision Tool-Assisted Speedrun (TAS) recording and playback utility for Roblox. Built upon the foundation of the original Tomato/Ali recorder, this version has been completely re-engineered from the ground up. It abandons hacky exploit-dependent hooks in favor of native Roblox API integration, resulting in 1:1 animation replication, flawlessly preserved easing curves, procedural physics retention, and advanced map-debugging tools.
 
 !(https://img.shields.io/badge/Language-Lua-blue.svg) !(https://img.shields.io/badge/Platform-Roblox-red.svg) !(https://img.shields.io/badge/Status-Active-green.svg)
 
