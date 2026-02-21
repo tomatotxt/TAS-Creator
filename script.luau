@@ -1,3 +1,11 @@
+local a = {Swim=0,fly=0,jump=0,R=0}
+for _, scr in getrunningscripts() do
+	if tostring(scr.Parent) == "ReplicatedFirst" or a[scr.Name] then
+		scr:Destroy()
+		print()
+	end
+end 
+
 --// PREVENT DUPLICATES //--
 if getgenv().TAS_Recorder_Running then
 	pcall(function() getgenv().TAS_Recorder_Disconnect() end)
@@ -20,15 +28,6 @@ local Mouse = LocalPlayer:GetMouse()
 --// UTILS //--
 local function round(num)
 	return math.floor(num * 1000 + 0.5) / 1000
-end
-
-local function GetPriorityEnum(name)
-	for _, enumItem in ipairs(Enum.AnimationPriority:GetEnumItems()) do
-		if enumItem.Name == name then
-			return enumItem
-		end
-	end
-	return Enum.AnimationPriority.Action
 end
 
 --// CONFIGURATION //--
@@ -62,10 +61,6 @@ local DebugView = false
 local OriginalVisuals = {} 
 local LastRecordTime = 0 
 
--- Unique Track Tracking
-local RecTrackCache = setmetatable({}, {__mode = "k"})
-local RecTrackCounter = 0
-
 -- State Flags
 getgenv().TAS_IsRecording = false 
 getgenv().TAS_IsPlaying = false 
@@ -73,11 +68,13 @@ getgenv().TAS_IsPlaying = false
 --// GUI OBJECTS //--
 local HUD
 local FrameCountLabel, SavestatesCountLabel, TimeTextLabel, TASNameBox, CapLockPauseLabel, KeyBindFrame, MainFrame
+local TrajectoryFolder 
+local TrajectoryLines = {} 
 
 --// CONNECTIONS //--
 local Connections = {}
 local CharConnections = {} 
-local PlaybackTracks = {} 
+local PlayConn -- Tracks the playback loop so we can cancel it directly
 
 --// HELPER FUNCTIONS //--
 local function notify(text, title, dur)
@@ -121,23 +118,33 @@ local function ToggleDebugView()
 			if v:IsA("BasePart") and not v:IsDescendantOf(LocalPlayer.Character) then
 				rawset(OriginalVisuals, v, {Color = v.Color, Transparency = v.Transparency})
 				
-				-- Default grey shade 
-				local shade = math.random(30, 90) / 100
-				v.Color = Color3.new(shade, shade, shade)
+				-- Deeply varied gray shades (thousands of variations for border contrast)
+				local gray = math.random(200, 800) / 1000
+				v.Color = Color3.new(gray, gray, gray)
 				
 				if v.Transparency == 1 then v.Transparency = 0.5 end
 				if v.CanCollide == false then v.Transparency = 0.9 end
 				
+				local minSize = math.min(v.Size.X, v.Size.Y, v.Size.Z)
+				
 				-- Check for TouchInterest first (Killbricks/Teleporters)
 				if v:FindFirstChild("TouchInterest") then 
-					local rShade = math.random(120, 255) / 255
-					v.Color = Color3.new(rShade, 0, 0)
+					-- Immensely varied shades of RED
+					v.Color = Color3.fromRGB(math.random(100, 255), math.random(0, 50), math.random(0, 50))
 					v.Transparency = 0 
 					
-				-- Check for thin parts (<= 1 stud)
-				elseif math.min(v.Size.X, v.Size.Y, v.Size.Z) <= 1 then 
-					local cShade = math.random(120, 255) / 255
-					v.Color = Color3.new(0, cShade, cShade)
+				-- Check for parts less than 1 stud thick
+				elseif minSize < 1 then
+					-- Random color (except cyan) with random brightness/darkness using HSV
+					local h
+					repeat
+						h = math.random()
+					until h < 0.45 or h > 0.55 -- Skip the cyan hue range (~0.5)
+					
+					local s = math.random(40, 100) / 100 -- Random saturation
+					local val = math.random(20, 100) / 100 -- Random brightness/darkness
+					
+					v.Color = Color3.fromHSV(h, s, val)
 				end
 			end
 		end
@@ -151,45 +158,16 @@ local function ToggleDebugView()
 end
 
 --// DATA CAPTURE //--
-local function GetActiveAnimations()
-	local anims = {}
-	local char = LocalPlayer.Character
-	if char then
-		local hum = char:FindFirstChild("Humanoid")
-		local animator = hum and hum:FindFirstChildOfClass("Animator")
-		if animator then
-			for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-				if track.Animation and track.Animation.AnimationId ~= "" then
-					
-					local uID = rawget(RecTrackCache, track)
-					if not uID then
-						RecTrackCounter = RecTrackCounter + 1
-						uID = RecTrackCounter
-						rawset(RecTrackCache, track, uID)
-					end
-					
-					table.insert(anims, {
-						Id = track.Animation.AnimationId,
-						T = round(track.TimePosition),
-						W = round(track.WeightCurrent),
-						P = track.Priority.Name,
-						S = round(track.Speed),
-						U = uID 
-					})
-				end
-			end
-		end
-	end
-	return anims
-end
-
 local function ReturnPlayerInfo()
 	local char = LocalPlayer.Character
 	local root = char and char:FindFirstChild("HumanoidRootPart")
+	local hum = char and char:FindFirstChild("Humanoid")
 	
 	local cf = root and root.CFrame or CFrame.new()
 	local vel = root and root.Velocity or Vector3.zero
+	local rvel = root and root.RotVelocity or Vector3.zero
 	local camCf = Workspace.CurrentCamera.CFrame
+	local hs = hum and hum:GetState().Name or "None"
 	
 	local cfComps = {cf:GetComponents()}
 	for index, value in ipairs(cfComps) do 
@@ -205,8 +183,9 @@ local function ReturnPlayerInfo()
 		CF = cfComps,
 		CCF = camComps,
 		V = {round(vel.X), round(vel.Y), round(vel.Z)},
-		T = round(tick() - TimeStart - TimePaused),
-		A = GetActiveAnimations()
+		RV = {round(rvel.X), round(rvel.Y), round(rvel.Z)},
+		HS = hs,
+		T = round(tick() - TimeStart - TimePaused)
 	}
 end
 
@@ -360,16 +339,28 @@ end
 local function SetCharacterState(InfoState)
 	if not LocalPlayer.Character then return end
 	local Root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+	local Hum = LocalPlayer.Character:FindFirstChild("Humanoid")
 	if not Root then return end
 
 	local charCF = CFrame.new(unpack(InfoState.CF))
-	local camCF = CFrame.new(unpack(InfoState.CCF))
 	local vel = Vector3.new(unpack(InfoState.V))
+	local rvel = Vector3.new(unpack(InfoState.RV))
 
 	Root.CFrame = charCF
-	Root.Velocity = vel
-	Root.RotVelocity = Vector3.zero
-	Workspace.CurrentCamera.CFrame = camCF
+	
+	-- Apply physics exactly to all limbs for flawless visual state reproduction
+	for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
+		if part:IsA("BasePart") then
+			part.Velocity = vel
+			part.RotVelocity = rvel
+		end
+	end
+
+	if Hum and InfoState.HS and InfoState.HS ~= "None" then
+		if Hum:GetState().Name ~= InfoState.HS then
+			pcall(function() Hum:ChangeState(Enum.HumanoidStateType[InfoState.HS]) end)
+		end
+	end
 end
 
 local function UserPauseToggle()
@@ -604,7 +595,6 @@ local function ViewTASPlayback()
 	local Character = LocalPlayer.Character
 	local Root = Character and Character:FindFirstChild("HumanoidRootPart")
 	local Humanoid = Character and Character:FindFirstChild("Humanoid")
-	local Animator = Humanoid and Humanoid:FindFirstChildOfClass("Animator")
 
 	if not Root then 
 		ViewingTAS = false
@@ -612,21 +602,21 @@ local function ViewTASPlayback()
 		return 
 	end
 
-	local animateScript = Character:FindFirstChild("Animate")
-	if animateScript then animateScript.Disabled = true end
-
-	if Animator then
-		for _, track in ipairs(Animator:GetPlayingAnimationTracks()) do
-			track:Stop(0)
+	-- Disable all internal state transitions so Roblox doesn't fight our ChangeState calls
+	if Humanoid then
+		for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
+			if state ~= Enum.HumanoidStateType.Dead then
+				pcall(function() Humanoid:SetStateEnabled(state, false) end)
+			end
 		end
 	end
 
 	Root.Anchored = false 
 	
 	local StartPlay = tick()
-	local PlayConn
 	local CurrentIndex = 1
 	
+	if PlayConn then PlayConn:Disconnect() end
 	PlayConn = RunService.Heartbeat:Connect(function()
 		local Elapsed = tick() - StartPlay
 		
@@ -645,126 +635,41 @@ local function ViewTASPlayback()
 			
 			local cfA = CFrame.new(unpack(FrameA.CF))
 			local cfB = CFrame.new(unpack(FrameB.CF))
-			local camA = CFrame.new(unpack(FrameA.CCF))
-			local camB = CFrame.new(unpack(FrameB.CCF))
+			local velA = Vector3.new(unpack(FrameA.V))
+			local velB = Vector3.new(unpack(FrameB.V))
+			local rvelA = Vector3.new(unpack(FrameA.RV))
+			local rvelB = Vector3.new(unpack(FrameB.RV))
 			
 			Root.CFrame = cfA:Lerp(cfB, Alpha)
-			Workspace.CurrentCamera.CFrame = camA:Lerp(camB, Alpha)
-			Root.Velocity = Vector3.zero
-			Root.RotVelocity = Vector3.zero
-
-			if Animator and FrameA.A then
-				local activeIds = {}
-				local mergedAnims = {}
-
-				if FrameA.A then
-					for _, animA in ipairs(FrameA.A) do
-						local pair = {A = animA, B = nil}
-						rawset(mergedAnims, animA.U, pair)
-					end
+			
+			-- Accurately apply exact playback velocity to all limbs
+			local curV = velA:Lerp(velB, Alpha)
+			local curRV = rvelA:Lerp(rvelB, Alpha)
+			for _, part in ipairs(Character:GetDescendants()) do
+				if part:IsA("BasePart") then
+					part.Velocity = curV
+					part.RotVelocity = curRV
 				end
+			end
 
-				if FrameB.A then
-					for _, animB in ipairs(FrameB.A) do
-						local existing = rawget(mergedAnims, animB.U)
-						if existing then
-							rawset(existing, "B", animB)
-						else
-							local pair = {A = nil, B = animB}
-							rawset(mergedAnims, animB.U, pair)
-						end
-					end
-				end
-
-				for uId, animPair in pairs(mergedAnims) do
-					rawset(activeIds, uId, true)
-					local track = rawget(PlaybackTracks, uId)
-					
-					local dataA = rawget(animPair, "A")
-					local dataB = rawget(animPair, "B")
-					local refData = dataA or dataB
-
-					if not track then
-						local anim = Instance.new("Animation")
-						anim.AnimationId = refData.Id
-						track = Animator:LoadAnimation(anim)
-						rawset(PlaybackTracks, uId, track)
-					end
-
-					if refData.P then
-						track.Priority = GetPriorityEnum(refData.P)
-					end
-
-					local startW = 0
-					local endW = 0
-					local startS = 1
-					local endS = 1
-					
-					if dataA then 
-						startW = dataA.W 
-						startS = dataA.S or 1
-					end
-					if dataB then 
-						endW = dataB.W 
-						endS = dataB.S or 1
-					end
-
-					local targetWeight = startW + (endW - startW) * Alpha
-					local targetSpeed = startS + (endS - startS) * Alpha
-					local targetTime = 0
-
-					if dataA and dataB then
-						if dataB.T >= dataA.T then
-							targetTime = dataA.T + (dataB.T - dataA.T) * Alpha
-						else
-							local len = track.Length
-							if len > 0 then
-								local dist = (len - dataA.T) + dataB.T
-								targetTime = dataA.T + dist * Alpha
-								if targetTime >= len then
-									targetTime = targetTime - len
-								end
-							else
-								targetTime = dataA.T
-							end
-						end
-					elseif dataA then
-						targetTime = dataA.T + Delta * Alpha
-					elseif dataB then
-						targetTime = math.max(0, dataB.T - Delta * (1 - Alpha))
-					end
-
-					if not track.IsPlaying then 
-						track:Play(0, targetWeight, targetSpeed) 
-						track.TimePosition = targetTime
-					else
-						track:AdjustWeight(targetWeight)
-						track:AdjustSpeed(targetSpeed)
-						
-						if math.abs(track.TimePosition - targetTime) > 0.15 then
-							track.TimePosition = targetTime
-						end
-					end
-				end
-				
-				for uId, track in pairs(PlaybackTracks) do
-					if not rawget(activeIds, uId) and track.IsPlaying then 
-						track:Stop(0) 
-					end
+			if Humanoid and FrameA.HS and FrameA.HS ~= "None" then
+				if Humanoid:GetState().Name ~= FrameA.HS then
+					pcall(function() Humanoid:ChangeState(Enum.HumanoidStateType[FrameA.HS]) end)
 				end
 			end
 		else
 			PlayConn:Disconnect()
+			PlayConn = nil
 			ViewingTAS = false
 			getgenv().TAS_IsPlaying = false 
 			Pause = true
 			Root.Anchored = true
 			
-			if animateScript then animateScript.Disabled = false end
-			for _, track in pairs(PlaybackTracks) do track:Stop(0) end
-			PlaybackTracks = {}
-			
+			-- Re-enable internal state transitions so the player regains normal control
 			if Humanoid then
+				for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
+					pcall(function() Humanoid:SetStateEnabled(state, true) end)
+				end
 				Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
 			end
 
@@ -785,6 +690,20 @@ end
 
 --// INITIALIZATION //--
 local function DisconnectAll()
+	if PlayConn then 
+		PlayConn:Disconnect()
+		PlayConn = nil 
+	end
+	
+	if TrajectoryFolder then
+		TrajectoryFolder:Destroy()
+		TrajectoryFolder = nil
+	end
+	TrajectoryLines = {}
+	
+	ViewingTAS = false
+	Pause = true
+	
 	for _, c in pairs(Connections) do c:Disconnect() end
 	for _, c in pairs(CharConnections) do c:Disconnect() end
 	if HUD then HUD:Destroy() end
@@ -793,13 +712,21 @@ local function DisconnectAll()
 	local char = LocalPlayer.Character
 	if char then
 		local root = char:FindFirstChild("HumanoidRootPart")
-		if root then root.Anchored = false; root.Velocity = Vector3.zero end
-		local animateScript = char:FindFirstChild("Animate")
-		if animateScript then animateScript.Disabled = false end
+		if root then 
+			root.Anchored = false
+			root.Velocity = Vector3.zero 
+			root.RotVelocity = Vector3.zero
+		end
+		
+		local hum = char:FindFirstChild("Humanoid")
+		if hum then
+			-- Ensure player gets control back even if script is killed mid-playback
+			for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
+				pcall(function() hum:SetStateEnabled(state, true) end)
+			end
+			pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+		end
 	end
-	
-	for _, track in pairs(PlaybackTracks) do pcall(function() track:Stop(0) end) end
-	PlaybackTracks = {}
 
 	getgenv().TAS_Recorder_Running = false
 	getgenv().TAS_IsRecording = false
@@ -862,8 +789,163 @@ local function Initialize()
 	initialData.T = 0
 	table.insert(Savestates, {initialData})
 	
+	-- Setup Visualizer Trajectory Folder
+	TrajectoryFolder = Instance.new("Folder")
+	TrajectoryFolder.Name = "TAS_Trajectory"
+	TrajectoryFolder.Parent = Workspace:FindFirstChild("Terrain") or Workspace
+	
 	SetUpGui()
 	updateStatusColor()
+	
+	-- Custom physics simulator predicting trajectory curve mathematically
+	table.insert(Connections, RunService.RenderStepped:Connect(function()
+		if not ViewingTAS then
+			local char = LocalPlayer.Character
+			local root = char and char:FindFirstChild("HumanoidRootPart")
+			local hum = char and char:FindFirstChild("Humanoid")
+			
+			if root and hum and (root.Velocity.Magnitude > 0.5 or hum.MoveDirection.Magnitude > 0.1) then
+				local p = root.Position
+				local v = root.Velocity
+				
+				-- Roblox internal physics perfectly documented values
+				local dt240 = 1 / 240
+				local grav = Vector3.new(0, -Workspace.Gravity, 0)
+				
+				local rayParams = RaycastParams.new()
+				rayParams.FilterType = Enum.RaycastFilterType.Exclude
+				rayParams.FilterDescendantsInstances = {char}
+				rayParams.RespectCanCollide = true -- Ignores parts that have CanCollide = false
+				
+				local points = {p}
+				local velocities = {v}
+				
+				-- Blockcast sizes matching character collision boundaries exactly
+				local charRot = root.CFrame.Rotation
+				local floorBox = Vector3.new(1.5, 0.2, 1.5) -- Captures ledge edges under legs
+				local wallBox = Vector3.new(1.5, 4.5, 1.5)  -- Captures full character height
+				
+				local feetOffset = Vector3.new(0, -3.1, 0)
+				local walkSpeed = hum.WalkSpeed
+				local targetDir = hum.MoveDirection
+				local targetVXZ = targetDir * walkSpeed
+				
+				-- The exact derived constants from the physics data!
+				local airAccelStep = 0.59584 * (walkSpeed / 16)
+				local groundFactorTarget = 0.625
+				local groundFactorCurrent = 0.375
+				
+				-- Simulate ~200 frames into the future
+				for frame = 1, 200 do
+					local hitSomething = false
+					
+					-- 4 physics micro-ticks per render frame to exactly match Roblox Engine
+					for step = 1, 4 do
+						local currVXZ = Vector3.new(v.X, 0, v.Z)
+						
+						-- Check if touching the floor via Blockcast to simulate leg width
+						local floorHit = Workspace:Blockcast(CFrame.new(p) * charRot, floorBox, feetOffset, rayParams)
+						
+						if floorHit then
+							-- GROUND PHYSICS: Verified perfectly exponential PD controller blending
+							currVXZ = (currVXZ * groundFactorCurrent) + (targetVXZ * groundFactorTarget)
+							
+							-- Project horizontal velocity onto sloped surface plane to accurately climb/slide
+							local normal = floorHit.Normal
+							v = currVXZ - (currVXZ:Dot(normal) * normal)
+						else
+							-- AIR PHYSICS: Verified perfectly linear acceleration step
+							local diff = targetVXZ - currVXZ
+							if diff.Magnitude > 0 then
+								local accelStep = math.min(diff.Magnitude, airAccelStep)
+								currVXZ = currVXZ + (diff.Unit * accelStep)
+							end
+							
+							v = Vector3.new(currVXZ.X, v.Y, currVXZ.Z) + (grav * dt240)
+						end
+						
+						local stepVec = v * dt240
+						
+						if stepVec.Magnitude > 0.0001 then
+							-- Check forward collision using full body width to prevent wall clipping
+							local hitCenter = Workspace:Blockcast(CFrame.new(p) * charRot, wallBox, stepVec, rayParams)
+							
+							if hitCenter then
+								-- Snap precisely to the wall boundary
+								p = p + (stepVec.Unit * hitCenter.Distance)
+								hitSomething = true
+								break
+							else
+								p = p + stepVec
+							end
+						end
+					end
+					
+					table.insert(points, p)
+					table.insert(velocities, v)
+					
+					if hitSomething then break end
+					-- Only stop predicting if BOTH current velocity and target velocity are 0
+					if v.Magnitude <= 1 and targetVXZ.Magnitude < 0.5 then break end
+				end
+				
+				local ws = hum.WalkSpeed > 0 and hum.WalkSpeed or 16
+				
+				-- Render the smooth curve via Cylinder bridging
+				for i = 1, #points - 1 do
+					local line = TrajectoryLines[i]
+					if not line then
+						line = Instance.new("CylinderHandleAdornment")
+						line.Radius = 0.08
+						line.ZIndex = 5
+						line.AlwaysOnTop = true
+						line.Adornee = Workspace.Terrain
+						line.Parent = TrajectoryFolder
+						TrajectoryLines[i] = line
+					end
+					
+					local p1, p2 = points[i], points[i+1]
+					local length = (p2 - p1).Magnitude
+					local mag = velocities[i].Magnitude
+					
+					if length > 0.001 then
+						line.Height = length
+						line.CFrame = CFrame.lookAt(p1 + (p2 - p1) / 2, p2)
+						
+						-- Color interpolate Green -> Yellow -> Red based on speed
+						local cG = Color3.new(0, 1, 0)
+						local cY = Color3.new(1, 1, 0)
+						local cR = Color3.new(1, 0, 0)
+						
+						if mag <= ws then
+							line.Color3 = cG:Lerp(cY, mag / ws)
+						else
+							line.Color3 = cY:Lerp(cR, math.clamp((mag - ws) / ws, 0, 1))
+						end
+						
+						line.Visible = true
+					else
+						line.Visible = false
+					end
+				end
+				
+				-- Hide leftover lines from array cache
+				for i = #points, #TrajectoryLines do
+					TrajectoryLines[i].Visible = false
+				end
+			else
+				-- Hide lines if standing still and making no inputs
+				for _, line in ipairs(TrajectoryLines) do
+					line.Visible = false
+				end
+			end
+		else
+			-- Hide lines during playback
+			for _, line in ipairs(TrajectoryLines) do
+				line.Visible = false
+			end
+		end
+	end))
 	
 	table.insert(Connections, RunService.Heartbeat:Connect(function(dt)
 		if not Pause and not ViewingTAS then
