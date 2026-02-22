@@ -16,15 +16,6 @@ local ShowTASPathDuringPlayback = false
 -- Set to true to playback the recorded camera movements (applies smoothing if ExtremeSmoothing is enabled).
 local PlaybackCamera = true
 
-
-local a = {Swim=0,fly=0,jump=0,R=0}
-for _, scr in getrunningscripts() do
-	if tostring(scr.Parent) == "ReplicatedFirst" or a[scr.Name] then
-		scr:Destroy()
-		print()
-	end
-end 
-
 --// PREVENT DUPLICATES //--
 if getgenv().TAS_Recorder_Running then
 	pcall(function() getgenv().TAS_Recorder_Disconnect() end)
