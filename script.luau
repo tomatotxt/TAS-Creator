@@ -691,8 +691,9 @@ local function ViewTASPlayback()
 	
 	if PlayConn then PlayConn:Disconnect() end
 	
-	-- Stepped runs BEFORE physics calculation. Extremely precise for applying overridden frame vectors!
-	PlayConn = RunService.Stepped:Connect(function()
+	-- RenderStepped runs at the very last moment before the frame is drawn.
+	-- This completely eliminates visual jitter between the Character and the Camera!
+	PlayConn = RunService.RenderStepped:Connect(function()
 		-- Graceful death handling: Stop if character breaks/dies during playback
 		if not Character or not Character.Parent or not Root or not Root.Parent or (Humanoid and Humanoid.Health <= 0) then
 			return -- Let the hum.Died event safely handle the rest
@@ -732,7 +733,7 @@ local function ViewTASPlayback()
 			-- Spherical Linear Interpolation for pure rotational CFrame precision
 			Root.CFrame = cfA:Lerp(cfB, Alpha)
 			
-			-- Apply Camera playback without locking CameraType to Scriptable
+			-- Apply Camera playback if enabled
 			if PlaybackCamera and FrameA.CCF and FrameB.CCF then
 				local camA = CFrame.new(unpack(FrameA.CCF))
 				local camB = CFrame.new(unpack(FrameB.CCF))
@@ -999,7 +1000,7 @@ local function Initialize()
 					else
 						targetDir = Vector3.zero
 					end
-					isHoldingJump = hum.Jump
+					isHoldingJump = false
 				else
 					isHoldingJump = UserInputService:IsKeyDown(Enum.KeyCode.Space) or hum.Jump
 				end
@@ -1021,25 +1022,42 @@ local function Initialize()
 				local groundFactorTarget = 0.625
 				local groundFactorCurrent = 0.375
 				
+				local jumpTimer = 0
+				local currentState = hum:GetState()
+				if currentState == Enum.HumanoidStateType.Freefall or currentState == Enum.HumanoidStateType.Jumping or currentState == Enum.HumanoidStateType.FallingDown then
+					jumpTimer = 15
+				end
+				if v.Y > 10 then
+					jumpTimer = 15
+				end
+				
 				-- Simulate ~200 frames into the future
 				for frame = 1, 200 do
 					local hitSomething = false
 					
 					for step = 1, 4 do
 						local currVXZ = Vector3.new(v.X, 0, v.Z)
-						local floorHit = Workspace:Blockcast(CFrame.new(p) * charRot, floorBox, feetOffset, rayParams)
+						local floorHit = nil
+						
+						if jumpTimer == 0 then
+							floorHit = Workspace:Blockcast(CFrame.new(p) * charRot, floorBox, feetOffset, rayParams)
+						end
 						
 						if floorHit then
 							currVXZ = (currVXZ * groundFactorCurrent) + (targetVXZ * groundFactorTarget)
 							
 							if isHoldingJump then
-								-- JUMP PHYSICS (Transitions perfectly into air next frame)
 								v = Vector3.new(currVXZ.X, jumpVelocity, currVXZ.Z)
+								jumpTimer = 15
 							else
 								local normal = floorHit.Normal
 								v = currVXZ - (currVXZ:Dot(normal) * normal)
 							end
 						else
+							if jumpTimer > 0 then
+								jumpTimer = jumpTimer - 1
+							end
+							
 							local diff = targetVXZ - currVXZ
 							if diff.Magnitude > 0 then
 								local accelStep = math.min(diff.Magnitude, airAccelStep)
