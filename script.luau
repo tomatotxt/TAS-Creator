@@ -1,3 +1,22 @@
+--// AUTO LOAD & PLAY //--
+-- Type a file name here (e.g. "MyRun") to instantly load and play it without the GUI. Leave blank ("") to use the normal creator tools.
+local AutoLoadAndPlayFile = ""
+
+-- Set to true to severely downsample the recorded frames and smoothly interpolate between them (Warning: Will cause massive clipping/floating!)
+local ExtremeSmoothing = false
+-- The target FPS to compress the recording into before playback (e.g., 1 = keeps only 1 frame per second)
+local TargetSmoothingFPS = 24
+
+-- Set to true to show the predicted velocity trajectory curve even while a TAS is playing.
+local ShowVelocityDuringPlayback = false
+
+-- Set to true to draw a line tracing the future path of the TAS during playback.
+local ShowTASPathDuringPlayback = false
+
+-- Set to true to playback the recorded camera movements (applies smoothing if ExtremeSmoothing is enabled).
+local PlaybackCamera = true
+
+
 local a = {Swim=0,fly=0,jump=0,R=0}
 for _, scr in getrunningscripts() do
 	if tostring(scr.Parent) == "ReplicatedFirst" or a[scr.Name] then
@@ -27,7 +46,12 @@ local Mouse = LocalPlayer:GetMouse()
 
 --// UTILS //--
 local function round(num)
-	return math.floor(num * 1000 + 0.5) / 1000
+	return math.floor(num * 10000 + 0.5) / 10000 -- Increased precision for TAS interpolation
+end
+
+local ValToStateName = {}
+for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
+	ValToStateName[state.Value] = state.Name
 end
 
 --// CONFIGURATION //--
@@ -46,7 +70,8 @@ local Keybinds = {
 	ResetToNormal   = Enum.KeyCode.Delete,
 	ViewTAS         = Enum.KeyCode.Zero,
 	LoadRun         = Enum.KeyCode.Minus,
-	DebugToggler    = Enum.KeyCode.V
+	DebugToggler    = Enum.KeyCode.V,
+	ToggleVelocityVis= Enum.KeyCode.L
 }
 
 --// VARIABLES //--
@@ -58,18 +83,22 @@ local ViewingTAS = false
 local TimePauseHolder
 local TimeStart
 local DebugView = false
+local ShowVelocityDuringRecording = true
 local OriginalVisuals = {} 
 local LastRecordTime = 0 
 
--- State Flags
+-- State Flags & Playback Variables
 getgenv().TAS_IsRecording = false 
 getgenv().TAS_IsPlaying = false 
+local ActivePlaybackFrames = nil
+local CurrentPlaybackIndex = 1
 
 --// GUI OBJECTS //--
 local HUD
 local FrameCountLabel, SavestatesCountLabel, TimeTextLabel, TASNameBox, CapLockPauseLabel, KeyBindFrame, MainFrame
 local TrajectoryFolder 
 local TrajectoryLines = {} 
+local PathLines = {} 
 
 --// CONNECTIONS //--
 local Connections = {}
@@ -167,7 +196,9 @@ local function ReturnPlayerInfo()
 	local vel = root and root.Velocity or Vector3.zero
 	local rvel = root and root.RotVelocity or Vector3.zero
 	local camCf = Workspace.CurrentCamera.CFrame
-	local hs = hum and hum:GetState().Name or "None"
+	
+	-- Save numeric enum value (18 is the value for Enum.HumanoidStateType.None)
+	local hs = hum and hum:GetState().Value or 18
 	
 	local cfComps = {cf:GetComponents()}
 	for index, value in ipairs(cfComps) do 
@@ -287,7 +318,7 @@ local function SetUpGui()
 	KeyBindFrame = Instance.new("Frame", HUD)
 	KeyBindFrame.AnchorPoint = Vector2.new(0.5, 1)
 	KeyBindFrame.Position = UDim2.new(0.5, 0, 0.9, -140)
-	KeyBindFrame.Size = UDim2.new(0, 320, 0, 320)
+	KeyBindFrame.Size = UDim2.new(0, 320, 0, 340)
 	KeyBindFrame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
 	KeyBindFrame.BackgroundTransparency = 0.2
 	KeyBindFrame.BorderColor3 = Color3.fromRGB(200, 200, 200)
@@ -326,6 +357,7 @@ local function SetUpGui()
 	AddKeyLabel(Keybinds.SaveRun.Name, "Save JSON")
 	AddKeyLabel(Keybinds.CollisionToggler.Name, "Toggle Collision")
 	AddKeyLabel(Keybinds.DebugToggler.Name, "Debug View (Colors)")
+	AddKeyLabel(Keybinds.ToggleVelocityVis.Name, "Toggle Velocity Vis")
 	AddKeyLabel(Keybinds.ViewTAS.Name, "Playback TAS")
 	AddKeyLabel(Keybinds.LoadRun.Name, "Load JSON")
 	AddKeyLabel(Keybinds.ResetToNormal.Name, "STOP SCRIPT")
@@ -356,9 +388,12 @@ local function SetCharacterState(InfoState)
 		end
 	end
 
-	if Hum and InfoState.HS and InfoState.HS ~= "None" then
-		if Hum:GetState().Name ~= InfoState.HS then
-			pcall(function() Hum:ChangeState(Enum.HumanoidStateType[InfoState.HS]) end)
+	-- Backwards compatible decode
+	local hsName = type(InfoState.HS) == "number" and ValToStateName[InfoState.HS] or InfoState.HS
+
+	if Hum and hsName and hsName ~= "None" then
+		if Hum:GetState().Name ~= hsName then
+			pcall(function() Hum:ChangeState(Enum.HumanoidStateType[hsName]) end)
 		end
 	end
 end
@@ -516,8 +551,13 @@ local function handleHold(key, action)
 end
 
 --// IO FUNCTIONS //--
-local function GetFileName()
-	local rawName = TASNameBox.Text
+local function GetFileName(overrideName)
+	if overrideName and overrideName ~= "" then
+		local name = overrideName:gsub("^%s*(.-)%s*$", "%1")
+		if not name:match("%.json$") then name = name .. ".json" end
+		return name
+	end
+	local rawName = TASNameBox and TASNameBox.Text or "Untitled"
 	local cleanName = rawName:gsub("%p", ""):gsub("^%s*(.-)%s*$", "%1")
 	if cleanName == "" then cleanName = "Untitled" end
 	return cleanName .. ".json"
@@ -536,13 +576,16 @@ local function SaveRun()
 	else notify("Save Failed: " .. tostring(err), "Error") end
 end
 
-local function LoadRun()
-	if not readfile then notify("Executor does not support readfile!", "Error"); return end
-	local fileName = GetFileName()
+local function LoadRun(overrideName)
+	if type(overrideName) ~= "string" then overrideName = nil end
+	if not readfile then notify("Executor does not support readfile!", "Error"); return false end
+	
+	local fileName = GetFileName(overrideName)
 	if not isfile("TAS_Recorder/" .. fileName) then
 		notify("File not found: TAS_Recorder/" .. fileName, "Error")
-		return
+		return false
 	end
+	
 	local success, err = pcall(function()
 		local content = readfile("TAS_Recorder/" .. fileName)
 		local loadedTAS = HttpService:JSONDecode(content)
@@ -551,28 +594,30 @@ local function LoadRun()
 		Savestates = rawget(loadedTAS, 1) or {}
 		PlayerInfo = rawget(loadedTAS, 2) or {}
 		
-		local hasFrames = (#PlayerInfo > 0)
-		if not hasFrames and #Savestates > 0 then
-			local lastList = rawget(Savestates, #Savestates)
-			if lastList and #lastList > 0 then
-				hasFrames = true
-			end
-		end
-
-		if hasFrames then
-			BackSavestate()
-		else
-			TimeStart = tick()
-			TimePaused = 0
-			TimePauseHolder = tick()
-		end
+		-- Load the run into memory silently, do not artificially advance physics frames
+		TimeStart = tick()
+		TimePaused = 0
+		TimePauseHolder = tick()
+		
+		Pause = true
+		getgenv().TAS_IsRecording = false
 		
 		UpdateGUIText()
 		UpdateTimeGUI()
+		updateStatusColor()
 	end)
-	if success then notify("Loaded " .. fileName, "Success") 
-	else notify("Load Failed: " .. tostring(err), "Error") end
+	
+	if success then 
+		notify("Loaded " .. fileName, "Success") 
+		return true
+	else 
+		notify("Load Failed: " .. tostring(err), "Error") 
+		return false
+	end
 end
+
+--// INITIALIZATION (Forward Declaration) //--
+local DisconnectAll
 
 local function ViewTASPlayback()
 	if ViewingTAS then return end
@@ -583,11 +628,36 @@ local function ViewTASPlayback()
 	end
 	for _, frame in ipairs(PlayerInfo) do table.insert(FlatFrames, frame) end
 	
-	if #FlatFrames == 0 then notify("No frames to play!", "Error"); return end
+	if #FlatFrames == 0 then 
+		notify("No frames to play!", "Error")
+		if AutoLoadAndPlayFile and AutoLoadAndPlayFile ~= "" then DisconnectAll() end
+		return 
+	end
+
+	-- Maintain a parallel reference to the original raw 60fps frames for absolute State precision
+	local FullFrames = FlatFrames
+
+	-- EXTREME SMOOTHING LOGIC (Downsampling Positional Frames)
+	if ExtremeSmoothing then
+		local smoothedFrames = {}
+		local interval = 1 / math.max(0.001, TargetSmoothingFPS)
+		local nextTargetTime = 0
+		
+		for i, frame in ipairs(FlatFrames) do
+			if frame.T >= nextTargetTime or i == 1 or i == #FlatFrames then
+				table.insert(smoothedFrames, frame)
+				nextTargetTime = frame.T + interval
+			end
+		end
+		FlatFrames = smoothedFrames
+	end
 
 	ViewingTAS = true
 	getgenv().TAS_IsRecording = false 
 	getgenv().TAS_IsPlaying = true 
+	
+	ActivePlaybackFrames = FlatFrames
+	CurrentPlaybackIndex = 1
 	
 	updateStatusColor()
 	notify("Starting Playback...", "TAS")
@@ -599,13 +669,15 @@ local function ViewTASPlayback()
 	if not Root then 
 		ViewingTAS = false
 		getgenv().TAS_IsPlaying = false
+		ActivePlaybackFrames = nil
+		if AutoLoadAndPlayFile and AutoLoadAndPlayFile ~= "" then DisconnectAll() end
 		return 
 	end
 
-	-- Disable all internal state transitions so Roblox doesn't fight our ChangeState calls
+	-- Disable all internal state transitions so Roblox doesn't fight our ChangeState calls (Except Running to allow anims)
 	if Humanoid then
 		for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
-			if state ~= Enum.HumanoidStateType.Dead then
+			if state ~= Enum.HumanoidStateType.Dead and state ~= Enum.HumanoidStateType.Running then
 				pcall(function() Humanoid:SetStateEnabled(state, false) end)
 			end
 		end
@@ -615,19 +687,36 @@ local function ViewTASPlayback()
 	
 	local StartPlay = tick()
 	local CurrentIndex = 1
+	local FullCurrentIndex = 1
 	
 	if PlayConn then PlayConn:Disconnect() end
-	PlayConn = RunService.Heartbeat:Connect(function()
+	
+	-- Stepped runs BEFORE physics calculation. Extremely precise for applying overridden frame vectors!
+	PlayConn = RunService.Stepped:Connect(function()
+		-- Graceful death handling: Stop if character breaks/dies during playback
+		if not Character or not Character.Parent or not Root or not Root.Parent or (Humanoid and Humanoid.Health <= 0) then
+			return -- Let the hum.Died event safely handle the rest
+		end
+		
 		local Elapsed = tick() - StartPlay
 		
+		-- Advance Positional Interpolation Frame (Smoothed)
 		while CurrentIndex < #FlatFrames and rawget(FlatFrames, CurrentIndex + 1) and rawget(FlatFrames, CurrentIndex + 1).T <= Elapsed do
 			CurrentIndex = CurrentIndex + 1
+			CurrentPlaybackIndex = CurrentIndex
+		end
+		
+		-- Advance State Frame (Raw 60fps)
+		while FullCurrentIndex < #FullFrames and rawget(FullFrames, FullCurrentIndex + 1) and rawget(FullFrames, FullCurrentIndex + 1).T <= Elapsed do
+			FullCurrentIndex = FullCurrentIndex + 1
 		end
 		
 		local FrameA = rawget(FlatFrames, CurrentIndex)
 		local FrameB = rawget(FlatFrames, CurrentIndex + 1)
+		local StateFrame = rawget(FullFrames, FullCurrentIndex)
 		
 		if FrameB then
+			-- Perfectly interpolates the elapsed time mathematically for smoothed positional visuals
 			local Delta = FrameB.T - FrameA.T
 			local Alpha = 0
 			if Delta > 0 then Alpha = (Elapsed - FrameA.T) / Delta end
@@ -640,9 +729,17 @@ local function ViewTASPlayback()
 			local rvelA = Vector3.new(unpack(FrameA.RV))
 			local rvelB = Vector3.new(unpack(FrameB.RV))
 			
+			-- Spherical Linear Interpolation for pure rotational CFrame precision
 			Root.CFrame = cfA:Lerp(cfB, Alpha)
 			
-			-- Accurately apply exact playback velocity to all limbs
+			-- Apply Camera playback without locking CameraType to Scriptable
+			if PlaybackCamera and FrameA.CCF and FrameB.CCF then
+				local camA = CFrame.new(unpack(FrameA.CCF))
+				local camB = CFrame.new(unpack(FrameB.CCF))
+				Workspace.CurrentCamera.CFrame = camA:Lerp(camB, Alpha)
+			end
+			
+			-- Accurately apply exact playback velocity to all limbs so hitboxes and physics flow smoothly
 			local curV = velA:Lerp(velB, Alpha)
 			local curRV = rvelA:Lerp(rvelB, Alpha)
 			for _, part in ipairs(Character:GetDescendants()) do
@@ -652,18 +749,51 @@ local function ViewTASPlayback()
 				end
 			end
 
-			if Humanoid and FrameA.HS and FrameA.HS ~= "None" then
-				if Humanoid:GetState().Name ~= FrameA.HS then
-					pcall(function() Humanoid:ChangeState(Enum.HumanoidStateType[FrameA.HS]) end)
+			-- Forceably check and inject Humanoid state on EVERY single frame using full 60FPS data!
+			if Humanoid and StateFrame and StateFrame.HS then
+				local targetStateName = type(StateFrame.HS) == "number" and ValToStateName[StateFrame.HS] or StateFrame.HS
+				
+				if targetStateName and targetStateName ~= "None" then
+					local currentState = Humanoid:GetState().Name
+					if currentState ~= targetStateName then
+						local targetStateEnum = Enum.HumanoidStateType[targetStateName]
+						if targetStateEnum then
+							pcall(function() Humanoid:ChangeState(targetStateEnum) end)
+						end
+					end
+					
+					-- Fix for Roblox's Animate script playing Walk/Run animations too slowly due to CFraming
+					if targetStateName == "Running" or targetStateName == "RunningNoPhysics" then
+						local flatSpeed = Vector3.new(curV.X, 0, curV.Z).Magnitude
+						local animSpeed = flatSpeed / 16 -- Roblox's default Animate script scales against 16.0
+						
+						local animator = Humanoid:FindFirstChildOfClass("Animator")
+						if animator then
+							for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+								if track.Priority == Enum.AnimationPriority.Core or track.Priority == Enum.AnimationPriority.Movement then
+									pcall(function() track:AdjustSpeed(animSpeed) end)
+								end
+							end
+						end
+					end
 				end
 			end
 		else
+			-- IF AUTO LOAD PLAYING: Clean everything up and unanchor
+			if AutoLoadAndPlayFile and AutoLoadAndPlayFile ~= "" then
+				DisconnectAll()
+				return
+			end
+			
+			-- IF MANUAL TAS CREATOR: End playback cleanly but remain paused for further editing
 			PlayConn:Disconnect()
 			PlayConn = nil
 			ViewingTAS = false
 			getgenv().TAS_IsPlaying = false 
 			Pause = true
 			Root.Anchored = true
+			ActivePlaybackFrames = nil
+			CurrentPlaybackIndex = 1
 			
 			-- Re-enable internal state transitions so the player regains normal control
 			if Humanoid then
@@ -689,7 +819,7 @@ local function CollisionToggler()
 end
 
 --// INITIALIZATION //--
-local function DisconnectAll()
+DisconnectAll = function()
 	if PlayConn then 
 		PlayConn:Disconnect()
 		PlayConn = nil 
@@ -700,9 +830,12 @@ local function DisconnectAll()
 		TrajectoryFolder = nil
 	end
 	TrajectoryLines = {}
+	PathLines = {}
 	
 	ViewingTAS = false
 	Pause = true
+	ActivePlaybackFrames = nil
+	CurrentPlaybackIndex = 1
 	
 	for _, c in pairs(Connections) do c:Disconnect() end
 	for _, c in pairs(CharConnections) do c:Disconnect() end
@@ -743,10 +876,28 @@ local function SetupCharacterConnections(char)
 	local hum = char:WaitForChild("Humanoid", 10)
 	if not hum then return end
 	
+	-- Graceful Death Handling
 	table.insert(CharConnections, hum.Died:Connect(function()
+		local wasPlaying = getgenv().TAS_IsPlaying
+		
 		Pause = true
 		getgenv().TAS_IsRecording = false
 		getgenv().TAS_IsPlaying = false
+		ViewingTAS = false
+		
+		if PlayConn then
+			PlayConn:Disconnect()
+			PlayConn = nil
+		end
+		
+		ActivePlaybackFrames = nil
+		CurrentPlaybackIndex = 1
+		
+		if AutoLoadAndPlayFile and AutoLoadAndPlayFile ~= "" and wasPlaying then
+			DisconnectAll()
+			return
+		end
+		
 		updateStatusColor()
 		notify("Character Died! Paused. Waiting for Respawn...", "TAS Warning", 5)
 		
@@ -794,12 +945,21 @@ local function Initialize()
 	TrajectoryFolder.Name = "TAS_Trajectory"
 	TrajectoryFolder.Parent = Workspace:FindFirstChild("Terrain") or Workspace
 	
-	SetUpGui()
-	updateStatusColor()
+	local isAuto = (AutoLoadAndPlayFile and AutoLoadAndPlayFile ~= "")
 	
-	-- Custom physics simulator predicting trajectory curve mathematically
+	-- Only generate UI if not in Auto-Play mode
+	if not isAuto then
+		SetUpGui()
+		updateStatusColor()
+	end
+	
+	-- Render visualizers smoothly
 	table.insert(Connections, RunService.RenderStepped:Connect(function()
-		if not ViewingTAS then
+		
+		-- 1. VELOCITY TRAJECTORY PREDICTION
+		local shouldShowVel = (not ViewingTAS and ShowVelocityDuringRecording) or (ViewingTAS and ShowVelocityDuringPlayback)
+		
+		if shouldShowVel then
 			local char = LocalPlayer.Character
 			local root = char and char:FindFirstChild("HumanoidRootPart")
 			local hum = char and char:FindFirstChild("Humanoid")
@@ -810,25 +970,51 @@ local function Initialize()
 				
 				-- Roblox internal physics perfectly documented values
 				local dt240 = 1 / 240
-				local grav = Vector3.new(0, -Workspace.Gravity, 0)
+				local grav = Vector3.new(0, -196.2, 0)
 				
 				local rayParams = RaycastParams.new()
 				rayParams.FilterType = Enum.RaycastFilterType.Exclude
 				rayParams.FilterDescendantsInstances = {char}
-				rayParams.RespectCanCollide = true -- Ignores parts that have CanCollide = false
+				rayParams.RespectCanCollide = true
 				
 				local points = {p}
 				local velocities = {v}
 				
 				-- Blockcast sizes matching character collision boundaries exactly
 				local charRot = root.CFrame.Rotation
-				local floorBox = Vector3.new(1.5, 0.2, 1.5) -- Captures ledge edges under legs
-				local wallBox = Vector3.new(1.5, 4.5, 1.5)  -- Captures full character height
+				local floorBox = Vector3.new(1.5, 0.2, 1.5) 
+				local wallBox = Vector3.new(1.5, 4.5, 1.5)  
 				
 				local feetOffset = Vector3.new(0, -3.1, 0)
 				local walkSpeed = hum.WalkSpeed
+				
+				-- When recording, use actual MoveDirection. When playing back, guess intended direction based on velocity
 				local targetDir = hum.MoveDirection
+				local isHoldingJump = false
+				
+				if ViewingTAS then
+					local flatV = Vector3.new(v.X, 0, v.Z)
+					if flatV.Magnitude > 0.5 then
+						targetDir = flatV.Unit
+					else
+						targetDir = Vector3.zero
+					end
+					isHoldingJump = hum.Jump
+				else
+					isHoldingJump = UserInputService:IsKeyDown(Enum.KeyCode.Space) or hum.Jump
+				end
+				
 				local targetVXZ = targetDir * walkSpeed
+				
+				-- Calculate correct jump force based on game settings
+				local jumpVelocity = 50
+				pcall(function()
+					if hum.UseJumpPower then
+						jumpVelocity = hum.JumpPower
+					else
+						jumpVelocity = math.sqrt(2 * Workspace.Gravity * hum.JumpHeight)
+					end
+				end)
 				
 				-- The exact derived constants from the physics data!
 				local airAccelStep = 0.59584 * (walkSpeed / 16)
@@ -839,39 +1025,33 @@ local function Initialize()
 				for frame = 1, 200 do
 					local hitSomething = false
 					
-					-- 4 physics micro-ticks per render frame to exactly match Roblox Engine
 					for step = 1, 4 do
 						local currVXZ = Vector3.new(v.X, 0, v.Z)
-						
-						-- Check if touching the floor via Blockcast to simulate leg width
 						local floorHit = Workspace:Blockcast(CFrame.new(p) * charRot, floorBox, feetOffset, rayParams)
 						
 						if floorHit then
-							-- GROUND PHYSICS: Verified perfectly exponential PD controller blending
 							currVXZ = (currVXZ * groundFactorCurrent) + (targetVXZ * groundFactorTarget)
 							
-							-- Project horizontal velocity onto sloped surface plane to accurately climb/slide
-							local normal = floorHit.Normal
-							v = currVXZ - (currVXZ:Dot(normal) * normal)
+							if isHoldingJump then
+								-- JUMP PHYSICS (Transitions perfectly into air next frame)
+								v = Vector3.new(currVXZ.X, jumpVelocity, currVXZ.Z)
+							else
+								local normal = floorHit.Normal
+								v = currVXZ - (currVXZ:Dot(normal) * normal)
+							end
 						else
-							-- AIR PHYSICS: Verified perfectly linear acceleration step
 							local diff = targetVXZ - currVXZ
 							if diff.Magnitude > 0 then
 								local accelStep = math.min(diff.Magnitude, airAccelStep)
 								currVXZ = currVXZ + (diff.Unit * accelStep)
 							end
-							
 							v = Vector3.new(currVXZ.X, v.Y, currVXZ.Z) + (grav * dt240)
 						end
 						
 						local stepVec = v * dt240
-						
 						if stepVec.Magnitude > 0.0001 then
-							-- Check forward collision using full body width to prevent wall clipping
 							local hitCenter = Workspace:Blockcast(CFrame.new(p) * charRot, wallBox, stepVec, rayParams)
-							
 							if hitCenter then
-								-- Snap precisely to the wall boundary
 								p = p + (stepVec.Unit * hitCenter.Distance)
 								hitSomething = true
 								break
@@ -883,22 +1063,19 @@ local function Initialize()
 					
 					table.insert(points, p)
 					table.insert(velocities, v)
-					
 					if hitSomething then break end
-					-- Only stop predicting if BOTH current velocity and target velocity are 0
-					if v.Magnitude <= 1 and targetVXZ.Magnitude < 0.5 then break end
+					if (not isHoldingJump) and v.Magnitude <= 1 and targetVXZ.Magnitude < 0.5 then break end
 				end
 				
 				local ws = hum.WalkSpeed > 0 and hum.WalkSpeed or 16
 				
-				-- Render the smooth curve via Cylinder bridging
 				for i = 1, #points - 1 do
 					local line = TrajectoryLines[i]
 					if not line then
 						line = Instance.new("CylinderHandleAdornment")
 						line.Radius = 0.08
 						line.ZIndex = 5
-						line.AlwaysOnTop = true
+						line.AlwaysOnTop = false
 						line.Adornee = Workspace.Terrain
 						line.Parent = TrajectoryFolder
 						TrajectoryLines[i] = line
@@ -912,7 +1089,6 @@ local function Initialize()
 						line.Height = length
 						line.CFrame = CFrame.lookAt(p1 + (p2 - p1) / 2, p2)
 						
-						-- Color interpolate Green -> Yellow -> Red based on speed
 						local cG = Color3.new(0, 1, 0)
 						local cY = Color3.new(1, 1, 0)
 						local cR = Color3.new(1, 0, 0)
@@ -922,26 +1098,57 @@ local function Initialize()
 						else
 							line.Color3 = cY:Lerp(cR, math.clamp((mag - ws) / ws, 0, 1))
 						end
-						
 						line.Visible = true
 					else
 						line.Visible = false
 					end
 				end
-				
-				-- Hide leftover lines from array cache
-				for i = #points, #TrajectoryLines do
-					TrajectoryLines[i].Visible = false
-				end
+				for i = #points, #TrajectoryLines do TrajectoryLines[i].Visible = false end
 			else
-				-- Hide lines if standing still and making no inputs
-				for _, line in ipairs(TrajectoryLines) do
-					line.Visible = false
-				end
+				for _, line in ipairs(TrajectoryLines) do line.Visible = false end
 			end
 		else
-			-- Hide lines during playback
-			for _, line in ipairs(TrajectoryLines) do
+			for _, line in ipairs(TrajectoryLines) do line.Visible = false end
+		end
+		
+		-- 2. TAS FUTURE PATH VISUALIZER
+		if ViewingTAS and ShowTASPathDuringPlayback and ActivePlaybackFrames then
+			local frames = ActivePlaybackFrames
+			local startIdx = CurrentPlaybackIndex
+			local maxFrames = math.min(#frames, startIdx + 1200) -- Show up to 1200 frames (20 seconds) ahead
+			
+			local lineIndex = 1
+			for i = startIdx, maxFrames - 1 do
+				local p1 = Vector3.new(unpack(frames[i].CF))
+				local p2 = Vector3.new(unpack(frames[i+1].CF))
+				local dist = (p2 - p1).Magnitude
+				
+				if dist > 0.005 then 
+					local line = PathLines[lineIndex]
+					if not line then
+						line = Instance.new("CylinderHandleAdornment")
+						line.Radius = 0.06
+						line.Color3 = Color3.fromRGB(0, 200, 255) -- Cyan Blue
+						line.Transparency = 0.2
+						line.ZIndex = 4
+						line.AlwaysOnTop = false
+						line.Adornee = Workspace.Terrain
+						line.Parent = TrajectoryFolder
+						PathLines[lineIndex] = line
+					end
+					
+					line.Height = dist
+					line.CFrame = CFrame.lookAt(p1 + (p2 - p1) / 2, p2)
+					line.Visible = true
+					lineIndex = lineIndex + 1
+				end
+			end
+			
+			for i = lineIndex, #PathLines do
+				PathLines[i].Visible = false
+			end
+		else
+			for _, line in ipairs(PathLines) do
 				line.Visible = false
 			end
 		end
@@ -979,6 +1186,9 @@ local function Initialize()
 		elseif Key == Keybinds.LoadRun then LoadRun()
 		elseif Key == Keybinds.ResetToNormal then DisconnectAll()
 		elseif Key == Keybinds.DebugToggler then ToggleDebugView()
+		elseif Key == Keybinds.ToggleVelocityVis then 
+			ShowVelocityDuringRecording = not ShowVelocityDuringRecording
+			notify("Velocity Visualizer: " .. (ShowVelocityDuringRecording and "ON" or "OFF"), "TAS Tools", 1)
 		elseif Key == Keybinds.GoFrameForward then task.spawn(function() handleHold(Key, GoFrameForward) end)
 		elseif Key == Keybinds.GoFrameBack then task.spawn(function() handleHold(Key, GoFrameBack) end)
 		end
@@ -997,6 +1207,23 @@ local function Initialize()
 	end
 	
 	notify("TAS Recorder Initialized", "TAS")
+	
+	-- IF AUTO-PLAY IS ACTIVATED:
+	if isAuto then
+		task.spawn(function()
+			if not LocalPlayer.Character then LocalPlayer.CharacterAdded:Wait() end
+			local char = LocalPlayer.Character
+			if not char:FindFirstChild("HumanoidRootPart") then char:WaitForChild("HumanoidRootPart", 5) end
+			
+			local loadSuccess = LoadRun(AutoLoadAndPlayFile)
+			if loadSuccess then
+				task.wait(0.1)
+				ViewTASPlayback()
+			else
+				DisconnectAll()
+			end
+		end)
+	end
 end
 
 Initialize()
