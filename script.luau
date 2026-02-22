@@ -672,15 +672,6 @@ local function ViewTASPlayback()
 		return 
 	end
 
-	-- Disable all internal state transitions so Roblox doesn't fight our ChangeState calls (Except Running to allow anims)
-	if Humanoid then
-		for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
-			if state ~= Enum.HumanoidStateType.Dead and state ~= Enum.HumanoidStateType.Running then
-				pcall(function() Humanoid:SetStateEnabled(state, false) end)
-			end
-		end
-	end
-
 	Root.Anchored = false 
 	
 	local StartPlay = tick()
@@ -760,21 +751,6 @@ local function ViewTASPlayback()
 							pcall(function() Humanoid:ChangeState(targetStateEnum) end)
 						end
 					end
-					
-					-- Fix for Roblox's Animate script playing Walk/Run animations too slowly due to CFraming
-					if targetStateName == "Running" or targetStateName == "RunningNoPhysics" then
-						local flatSpeed = Vector3.new(curV.X, 0, curV.Z).Magnitude
-						local animSpeed = flatSpeed / 16 -- Roblox's default Animate script scales against 16.0
-						
-						local animator = Humanoid:FindFirstChildOfClass("Animator")
-						if animator then
-							for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-								if track.Priority == Enum.AnimationPriority.Core or track.Priority == Enum.AnimationPriority.Movement then
-									pcall(function() track:AdjustSpeed(animSpeed) end)
-								end
-							end
-						end
-					end
 				end
 			end
 		else
@@ -794,11 +770,7 @@ local function ViewTASPlayback()
 			ActivePlaybackFrames = nil
 			CurrentPlaybackIndex = 1
 			
-			-- Re-enable internal state transitions so the player regains normal control
 			if Humanoid then
-				for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
-					pcall(function() Humanoid:SetStateEnabled(state, true) end)
-				end
 				Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
 			end
 
@@ -852,10 +824,6 @@ DisconnectAll = function()
 		
 		local hum = char:FindFirstChild("Humanoid")
 		if hum then
-			-- Ensure player gets control back even if script is killed mid-playback
-			for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
-				pcall(function() hum:SetStateEnabled(state, true) end)
-			end
 			pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
 		end
 	end
