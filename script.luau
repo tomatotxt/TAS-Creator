@@ -1,20 +1,27 @@
 --// AUTO LOAD & PLAY //--
 -- Type a file name here (e.g. "MyRun") to instantly load and play it without the GUI. Leave blank ("") to use the normal creator tools.
-local AutoLoadAndPlayFile = ""
+local AutoLoadAndPlayFile = getgenv().AutoLoadAndPlayFile
+if AutoLoadAndPlayFile == nil then AutoLoadAndPlayFile = "" end
 
 -- Set to true to severely downsample the recorded frames and smoothly interpolate between them (Warning: Will cause massive clipping/floating!)
-local ExtremeSmoothing = false
+local ExtremeSmoothing = getgenv().ExtremeSmoothing
+if ExtremeSmoothing == nil then ExtremeSmoothing = false end
+
 -- The target FPS to compress the recording into before playback (e.g., 1 = keeps only 1 frame per second)
-local TargetSmoothingFPS = 24
+local TargetSmoothingFPS = getgenv().TargetSmoothingFPS
+if TargetSmoothingFPS == nil then TargetSmoothingFPS = 24 end
 
 -- Set to true to show the predicted velocity trajectory curve even while a TAS is playing.
-local ShowVelocityDuringPlayback = false
+local ShowVelocityDuringPlayback = getgenv().ShowVelocityDuringPlayback
+if ShowVelocityDuringPlayback == nil then ShowVelocityDuringPlayback = false end
 
 -- Set to true to draw a line tracing the future path of the TAS during playback.
-local ShowTASPathDuringPlayback = false
+local ShowTASPathDuringPlayback = getgenv().ShowTASPathDuringPlayback
+if ShowTASPathDuringPlayback == nil then ShowTASPathDuringPlayback = false end
 
 -- Set to true to playback the recorded camera movements (applies smoothing if ExtremeSmoothing is enabled).
-local PlaybackCamera = true
+local PlaybackCamera = getgenv().PlaybackCamera
+if PlaybackCamera == nil then PlaybackCamera = true end
 
 --// PREVENT DUPLICATES //--
 if getgenv().TAS_Recorder_Running then
