@@ -23,6 +23,10 @@ if ShowTASPathDuringPlayback == nil then ShowTASPathDuringPlayback = false end
 local PlaybackCamera = getgenv().PlaybackCamera
 if PlaybackCamera == nil then PlaybackCamera = true end
 
+-- Maximum frames to predict for the trajectory visualizer
+local MaxTrajectoryFrames = getgenv().MaxTrajectoryFrames
+if MaxTrajectoryFrames == nil then MaxTrajectoryFrames = 150 end
+
 --// PREVENT DUPLICATES //--
 if getgenv().TAS_Recorder_Running then
 	pcall(function() getgenv().TAS_Recorder_Disconnect() end)
@@ -116,16 +120,26 @@ local function makeDraggable(guiObject)
 		local delta = input.Position - dragStart
 		guiObject.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
 	end
+	
+	local inputConn
+	inputConn = UserInputService.InputChanged:Connect(function(input) 
+		if input == dragInput and dragging then update(input) end 
+	end)
+	
 	guiObject.InputBegan:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 			dragging = true; dragStart = input.Position; startPos = guiObject.Position
 			input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
 		end
 	end)
+	
 	guiObject.InputChanged:Connect(function(input)
 		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end
 	end)
-	UserInputService.InputChanged:Connect(function(input) if input == dragInput and dragging then update(input) end end)
+
+	guiObject.Destroying:Connect(function()
+		if inputConn then inputConn:Disconnect() end
+	end)
 end
 
 local function updateStatusColor()
@@ -143,7 +157,7 @@ local function ToggleDebugView()
 		OriginalVisuals = {}
 		for _, v in ipairs(Workspace:GetDescendants()) do
 			if v:IsA("BasePart") and not v:IsDescendantOf(LocalPlayer.Character) then
-				rawset(OriginalVisuals, v, {Color = v.Color, Transparency = v.Transparency})
+				OriginalVisuals[v] = {Color = v.Color, Transparency = v.Transparency}
 				
 				-- Deeply varied gray shades (thousands of variations for border contrast)
 				local gray = math.random(200, 800) / 1000
@@ -198,15 +212,13 @@ local function ReturnPlayerInfo()
 	-- Save numeric enum value (18 is the value for Enum.HumanoidStateType.None)
 	local hs = hum and hum:GetState().Value or 18
 	
+	-- FIX: Only round position vector components (X, Y, Z). 
+	-- Rounding the rotation matrix breaks matrix orthogonality, causing micro-drift over time.
 	local cfComps = {cf:GetComponents()}
-	for index, value in ipairs(cfComps) do 
-		rawset(cfComps, index, round(value)) 
-	end
+	for i = 1, 3 do cfComps[i] = round(cfComps[i]) end
 	
 	local camComps = {camCf:GetComponents()}
-	for index, value in ipairs(camComps) do 
-		rawset(camComps, index, round(value)) 
-	end
+	for i = 1, 3 do camComps[i] = round(camComps[i]) end
 
 	return {
 		CF = cfComps,
@@ -214,7 +226,7 @@ local function ReturnPlayerInfo()
 		V = {round(vel.X), round(vel.Y), round(vel.Z)},
 		RV = {round(rvel.X), round(rvel.Y), round(rvel.Z)},
 		HS = hs,
-		T = round(tick() - TimeStart - TimePaused)
+		T = round(os.clock() - TimeStart - TimePaused)
 	}
 end
 
@@ -233,7 +245,7 @@ end
 
 local function UpdateTimeGUI()
 	if TimeTextLabel then
-		local TimePlayed = tick() - TimeStart - TimePaused
+		local TimePlayed = os.clock() - TimeStart - TimePaused
 		TimeTextLabel.Text = FormatTime(TimePlayed)
 	end
 end
@@ -390,6 +402,7 @@ local function SetCharacterState(InfoState)
 	local hsName = type(InfoState.HS) == "number" and ValToStateName[InfoState.HS] or InfoState.HS
 
 	if Hum and hsName and hsName ~= "None" then
+		-- Only ever call ChangeState if the current state strictly mismatches
 		if Hum:GetState().Name ~= hsName then
 			pcall(function() Hum:ChangeState(Enum.HumanoidStateType[hsName]) end)
 		end
@@ -405,11 +418,11 @@ local function UserPauseToggle()
 	if Root then Root.Anchored = Pause end
 
 	if Pause then
-		TimePauseHolder = tick()
+		TimePauseHolder = os.clock()
 		if TimeTextLabel then TimeTextLabel.TextColor3 = Color3.fromRGB(255, 255, 0) end
 	else
 		if TimePauseHolder then
-			TimePaused = TimePaused + (tick() - TimePauseHolder)
+			TimePaused = TimePaused + (os.clock() - TimePauseHolder)
 			TimePauseHolder = nil
 		end
 		if TimeTextLabel then TimeTextLabel.TextColor3 = Color3.fromRGB(255, 255, 255) end
@@ -429,16 +442,16 @@ end
 local function RemoveSavestate()
 	if #Savestates > 1 then
 		table.remove(Savestates)
-		local lastSegment = rawget(Savestates, #Savestates)
+		local lastSegment = Savestates[#Savestates]
 		if lastSegment and #lastSegment > 0 then
-			local lastFrame = rawget(lastSegment, #lastSegment)
+			local lastFrame = lastSegment[#lastSegment]
 			PlayerInfo = {}
 			Pause = true
 			getgenv().TAS_IsRecording = false
 			
-			TimeStart = tick() - lastFrame.T
+			TimeStart = os.clock() - lastFrame.T
 			TimePaused = 0
-			TimePauseHolder = tick() 
+			TimePauseHolder = os.clock() 
 			
 			SetCharacterState(lastFrame)
 			UpdateTimeGUI()
@@ -455,15 +468,15 @@ local function EnterSavestate()
 	if #Savestates > 0 then
 		local lastSegment = table.remove(Savestates)
 		PlayerInfo = lastSegment
-		local lastFrame = rawget(PlayerInfo, #PlayerInfo)
+		local lastFrame = PlayerInfo[#PlayerInfo]
 		if lastFrame then
 			Pause = true
 			getgenv().TAS_IsRecording = false
 			SetCharacterState(lastFrame)
 			
-			TimeStart = tick() - lastFrame.T
+			TimeStart = os.clock() - lastFrame.T
 			TimePaused = 0
-			TimePauseHolder = tick()
+			TimePauseHolder = os.clock()
 			
 			UpdateGUIText()
 			UpdateTimeGUI()
@@ -477,9 +490,9 @@ end
 
 local function BackSavestate()
 	if #Savestates > 0 then
-		local lastStateList = rawget(Savestates, #Savestates)
+		local lastStateList = Savestates[#Savestates]
 		if lastStateList and #lastStateList > 0 then
-			local InfoState = rawget(lastStateList, #lastStateList)
+			local InfoState = lastStateList[#lastStateList]
 			PlayerInfo = {}
 			Pause = true
 			getgenv().TAS_IsRecording = false
@@ -487,9 +500,9 @@ local function BackSavestate()
 				LocalPlayer.Character.HumanoidRootPart.Anchored = true
 			end
 			
-			TimeStart = tick() - InfoState.T
+			TimeStart = os.clock() - InfoState.T
 			TimePaused = 0
-			TimePauseHolder = tick()
+			TimePauseHolder = os.clock()
 			
 			SetCharacterState(InfoState)
 			updateStatusColor()
@@ -512,8 +525,8 @@ local function GoFrameBack()
 	local TargetFrameInfo = nil
 	
 	if #PlayerInfo > 1 then
-		TargetFrameInfo = rawget(PlayerInfo, #PlayerInfo - 1)
-		rawset(PlayerInfo, #PlayerInfo, nil)
+		TargetFrameInfo = PlayerInfo[#PlayerInfo - 1]
+		PlayerInfo[#PlayerInfo] = nil
 	end
 
 	if TargetFrameInfo then
@@ -525,9 +538,9 @@ local function GoFrameBack()
 			end
 		end
 		
-		TimeStart = tick() - TargetFrameInfo.T
+		TimeStart = os.clock() - TargetFrameInfo.T
 		TimePaused = 0
-		TimePauseHolder = tick()
+		TimePauseHolder = os.clock()
 		
 		SetCharacterState(TargetFrameInfo)
 		UpdateTimeGUI()
@@ -539,10 +552,12 @@ end
 --// REPEATED INPUT HANDLERS //--
 local heldInputs = {}
 local function handleHold(key, action)
-	rawset(heldInputs, key, true)
+	-- FIX: Prevent concurrency duplication by tying the loop to a unique execution ID
+	local pressId = os.clock()
+	heldInputs[key] = pressId
 	action()
 	task.wait(0.2)
-	while rawget(heldInputs, key) do
+	while heldInputs[key] == pressId do
 		action()
 		task.wait(1/50)
 	end
@@ -587,15 +602,19 @@ local function LoadRun(overrideName)
 	local success, err = pcall(function()
 		local content = readfile("TAS_Recorder/" .. fileName)
 		local loadedTAS = HttpService:JSONDecode(content)
-		if type(loadedTAS) ~= "table" then error("Invalid File") end
 		
-		Savestates = rawget(loadedTAS, 1) or {}
-		PlayerInfo = rawget(loadedTAS, 2) or {}
+		-- FIX: Strict structural validation
+		if type(loadedTAS) ~= "table" or type(loadedTAS[1]) ~= "table" or type(loadedTAS[2]) ~= "table" then 
+			error("Invalid TAS file format") 
+		end
+		
+		Savestates = loadedTAS[1]
+		PlayerInfo = loadedTAS[2]
 		
 		-- Load the run into memory silently, do not artificially advance physics frames
-		TimeStart = tick()
+		TimeStart = os.clock()
 		TimePaused = 0
-		TimePauseHolder = tick()
+		TimePauseHolder = os.clock()
 		
 		Pause = true
 		getgenv().TAS_IsRecording = false
@@ -674,36 +693,36 @@ local function ViewTASPlayback()
 
 	Root.Anchored = false 
 	
-	local StartPlay = tick()
+	local StartPlay = os.clock()
 	local CurrentIndex = 1
 	local FullCurrentIndex = 1
 	
 	if PlayConn then PlayConn:Disconnect() end
 	
-	-- RenderStepped runs at the very last moment before the frame is drawn.
-	-- This completely eliminates visual jitter between the Character and the Camera!
-	PlayConn = RunService.RenderStepped:Connect(function()
+	-- Utilizing Heartbeat: Because Root is unanchored, Heartbeat updates CFrame and Velocity 
+	-- *after* the physics step but without blocking the Render thread, causing optimal visual smoothness.
+	PlayConn = RunService.Heartbeat:Connect(function()
 		-- Graceful death handling: Stop if character breaks/dies during playback
 		if not Character or not Character.Parent or not Root or not Root.Parent or (Humanoid and Humanoid.Health <= 0) then
 			return -- Let the hum.Died event safely handle the rest
 		end
 		
-		local Elapsed = tick() - StartPlay
+		local Elapsed = os.clock() - StartPlay
 		
 		-- Advance Positional Interpolation Frame (Smoothed)
-		while CurrentIndex < #FlatFrames and rawget(FlatFrames, CurrentIndex + 1) and rawget(FlatFrames, CurrentIndex + 1).T <= Elapsed do
+		while CurrentIndex < #FlatFrames and FlatFrames[CurrentIndex + 1] and FlatFrames[CurrentIndex + 1].T <= Elapsed do
 			CurrentIndex = CurrentIndex + 1
 			CurrentPlaybackIndex = CurrentIndex
 		end
 		
 		-- Advance State Frame (Raw 60fps)
-		while FullCurrentIndex < #FullFrames and rawget(FullFrames, FullCurrentIndex + 1) and rawget(FullFrames, FullCurrentIndex + 1).T <= Elapsed do
+		while FullCurrentIndex < #FullFrames and FullFrames[FullCurrentIndex + 1] and FullFrames[FullCurrentIndex + 1].T <= Elapsed do
 			FullCurrentIndex = FullCurrentIndex + 1
 		end
 		
-		local FrameA = rawget(FlatFrames, CurrentIndex)
-		local FrameB = rawget(FlatFrames, CurrentIndex + 1)
-		local StateFrame = rawget(FullFrames, FullCurrentIndex)
+		local FrameA = FlatFrames[CurrentIndex]
+		local FrameB = FlatFrames[CurrentIndex + 1]
+		local StateFrame = FullFrames[FullCurrentIndex]
 		
 		if FrameB then
 			-- Perfectly interpolates the elapsed time mathematically for smoothed positional visuals
@@ -745,6 +764,7 @@ local function ViewTASPlayback()
 				
 				if targetStateName and targetStateName ~= "None" then
 					local currentState = Humanoid:GetState().Name
+					-- Only ever call ChangeState if the current state strictly mismatches
 					if currentState ~= targetStateName then
 						local targetStateEnum = Enum.HumanoidStateType[targetStateName]
 						if targetStateEnum then
@@ -770,8 +790,9 @@ local function ViewTASPlayback()
 			ActivePlaybackFrames = nil
 			CurrentPlaybackIndex = 1
 			
-			if Humanoid then
-				Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+			-- Cleanup getting up state with checks
+			if Humanoid and Humanoid:GetState() ~= Enum.HumanoidStateType.GettingUp then
+				pcall(function() Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
 			end
 
 			updateStatusColor()
@@ -823,7 +844,7 @@ DisconnectAll = function()
 		end
 		
 		local hum = char:FindFirstChild("Humanoid")
-		if hum then
+		if hum and hum:GetState() ~= Enum.HumanoidStateType.GettingUp then
 			pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
 		end
 	end
@@ -874,11 +895,11 @@ local function SetupCharacterConnections(char)
 		
 		local lastState = nil
 		if #PlayerInfo > 0 then
-			lastState = rawget(PlayerInfo, #PlayerInfo)
+			lastState = PlayerInfo[#PlayerInfo]
 		elseif #Savestates > 0 then
-			local lastList = rawget(Savestates, #Savestates)
+			local lastList = Savestates[#Savestates]
 			if lastList and #lastList > 0 then
-				lastState = rawget(lastList, #lastList)
+				lastState = lastList[#lastList]
 			end
 		end
 		
@@ -900,8 +921,8 @@ local function Initialize()
 	Pause = true
 	getgenv().TAS_IsRecording = false
 	getgenv().TAS_IsPlaying = false
-	TimeStart = tick()
-	TimePauseHolder = tick()
+	TimeStart = os.clock()
+	TimePauseHolder = os.clock()
 	
 	local initialData = ReturnPlayerInfo()
 	initialData.T = 0
@@ -920,8 +941,8 @@ local function Initialize()
 		updateStatusColor()
 	end
 	
-	-- Render visualizers smoothly
-	table.insert(Connections, RunService.RenderStepped:Connect(function()
+	-- Render visualizers smoothly (Post-Physics execution)
+	table.insert(Connections, RunService.Heartbeat:Connect(function()
 		
 		-- 1. VELOCITY TRAJECTORY PREDICTION
 		local shouldShowVel = (not ViewingTAS and ShowVelocityDuringRecording) or (ViewingTAS and ShowVelocityDuringPlayback)
@@ -997,8 +1018,8 @@ local function Initialize()
 					jumpTimer = 15
 				end
 				
-				-- Simulate ~200 frames into the future
-				for frame = 1, 200 do
+				-- Simulate optimized frames into the future
+				for frame = 1, MaxTrajectoryFrames do
 					local hitSomething = false
 					
 					for step = 1, 4 do
@@ -1140,7 +1161,7 @@ local function Initialize()
 	
 	table.insert(Connections, RunService.Heartbeat:Connect(function(dt)
 		if not Pause and not ViewingTAS then
-			local now = tick()
+			local now = os.clock()
 			if now - LastRecordTime < (1/60) then return end
 			LastRecordTime = now
 
@@ -1179,7 +1200,7 @@ local function Initialize()
 	end))
 	
 	table.insert(Connections, UserInputService.InputEnded:Connect(function(Input)
-		rawset(heldInputs, Input.KeyCode, false)
+		heldInputs[Input.KeyCode] = nil
 	end))
 	
 	table.insert(Connections, LocalPlayer.CharacterAdded:Connect(SetupCharacterConnections))
