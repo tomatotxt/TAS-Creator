@@ -1,5 +1,3 @@
---- START OF FILE Paste February 23, 2026 - 2:40PM ---
-
 --// AUTO LOAD & PLAY //--
 -- Type a file name here (e.g. "MyRun") to instantly load and play it without the GUI. Leave blank ("") to use the normal creator tools.
 local AutoLoadAndPlayFile = getgenv().AutoLoadAndPlayFile
@@ -62,6 +60,21 @@ local KeepEnabledStates = {
 	[Enum.HumanoidStateType.None] = true
 }
 
+-- Foolproof Deep Copy for tables (Used for flawless Savestating)
+local function DeepCopy(orig)
+	local orig_type = type(orig)
+	local copy
+	if orig_type == 'table' then
+		copy = table.create and table.create(#orig) or {}
+		for orig_key, orig_value in pairs(orig) do
+			copy[orig_key] = DeepCopy(orig_value)
+		end
+	else
+		copy = orig
+	end
+	return copy
+end
+
 --// CONFIGURATION //--
 local Keybinds = {
 	AddSavestate    = Enum.KeyCode.One,
@@ -92,6 +105,7 @@ local TimePauseHolder
 local TimeStart
 local DebugView = false
 local ShowVelocityDuringRecording = true
+local LastRecordTime = 0
 
 -- WEAK TABLE to prevent memory leaks if parts are destroyed during Debug View
 local OriginalVisuals = setmetatable({}, { __mode = "k" }) 
@@ -159,14 +173,12 @@ end
 
 --// MATH UTILS //--
 local function CFrameToQuat(cf)
-	-- Quaternions eliminate Gimbal Lock at ±90 pitch completely natively
 	local axis, angle = cf:ToAxisAngle()
 	local sinHalf = math.sin(angle/2)
 	return axis.X * sinHalf, axis.Y * sinHalf, axis.Z * sinHalf, math.cos(angle/2)
 end
 
 local function QuatToCFrame(x, y, z, qX, qY, qZ, qW)
-	-- Roblox supports Quaternion CFrames natively: CFrame.new(x, y, z, qX, qY, qZ, qW)
 	return CFrame.new(x, y, z, qX, qY, qZ, qW)
 end
 
@@ -179,8 +191,8 @@ local function ToggleDebugView()
 		
 		local descendants = Workspace:GetDescendants()
 		for i, v in ipairs(descendants) do
-			if i % 500 == 0 then task.wait() end -- Added yield to prevent client freezing
-			if not DebugView then return end -- Abort if toggled off mid-yield
+			if i % 500 == 0 then task.wait() end 
+			if not DebugView then return end 
 			
 			if v:IsA("BasePart") and not v:IsDescendantOf(LocalPlayer.Character) then
 				OriginalVisuals[v] = {Color = v.Color, Transparency = v.Transparency}
@@ -372,7 +384,7 @@ local function SetUpGui()
 	AddKeyLabel(Keybinds.BackSavestate.Name, "Load Last Savestate")
 	AddKeyLabel(Keybinds.GoFrameBack.Name, "-1 Frame")
 	AddKeyLabel(Keybinds.GoFrameForward.Name, "+1 Frame")
-	AddKeyLabel(Keybinds.SaveRun.Name, "Save Run")
+	AddKeyLabel(Keybinds.SaveRun.Name, "Save Run (Hold for JSON)")
 	AddKeyLabel(Keybinds.CollisionToggler.Name, "Toggle Collision")
 	AddKeyLabel(Keybinds.DebugToggler.Name, "Debug View (Colors)")
 	AddKeyLabel(Keybinds.ToggleVelocityVis.Name, "Toggle Velocity Vis")
@@ -387,6 +399,12 @@ end
 
 --// STATE MANAGEMENT //--
 local function SetCharacterState(InfoState)
+	-- FIX: Strict structural validation to prevent malformed frames from breaking the unpacked math
+	if not InfoState or type(InfoState) ~= "table" then return end
+	if not InfoState.CF or type(InfoState.CF) ~= "table" then return end
+	if not InfoState.V or type(InfoState.V) ~= "table" then return end
+	if not InfoState.RV or type(InfoState.RV) ~= "table" then return end
+
 	if not LocalPlayer.Character then return end
 	local Root = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 	local Hum = LocalPlayer.Character:FindFirstChild("Humanoid")
@@ -435,15 +453,7 @@ end
 
 --// RECORDING FUNCTIONS //--
 local function AddSavestate()
-	local stateCopy = table.create and table.create(#PlayerInfo) or {}
-	for i, v in ipairs(PlayerInfo) do
-		stateCopy[i] = {
-			T = v.T, HS = v.HS,
-			V = {v.V[1], v.V[2], v.V[3]},
-			RV = {v.RV[1], v.RV[2], v.RV[3]},
-			CF = {table.unpack(v.CF)}, CCF = {table.unpack(v.CCF)}
-		}
-	end
+	local stateCopy = DeepCopy(PlayerInfo)
 	table.insert(Savestates, stateCopy)
 	PlayerInfo = {}
 	UpdateGUIText()
@@ -572,7 +582,7 @@ local function handleHold(key, action)
 	end
 end
 
---// IO FUNCTIONS (Quaternion Packed Binary Format) //--
+--// IO FUNCTIONS (Quaternion Packed Binary Format & JSON Options) //--
 local function GetFileName(overrideName)
 	if overrideName and overrideName ~= "" then
 		local name = overrideName:gsub("^%s*(.-)%s*$", "%1")
@@ -585,9 +595,7 @@ local function GetFileName(overrideName)
 	return cleanName .. ".tas"
 end
 
--- V3 Format: 1 Float(T), 1 Byte(HS), 20 Floats(V, RV, CF[Pos,Quat], CCF[Pos,Quat]) = 85 Bytes Total
 local FRAME_PACK_FMT_V3 = "<f B " .. string.rep("f", 20)
--- Legacy formats
 local FRAME_PACK_FMT_V2 = "<f B " .. string.rep("f", 18)
 local FRAME_PACK_FMT_V1 = "<f B " .. string.rep("f", 30)
 
@@ -658,7 +666,6 @@ local function SaveRun()
 	local fileName = GetFileName()
 	local success, err = pcall(function()
 		local chunks = {}
-		-- Header: TASB (Magic), 3 (Quaternion Version)
 		table.insert(chunks, string.pack("<c4 B", "TASB", 3))
 
 		table.insert(chunks, string.pack("<I4", #Savestates))
@@ -684,6 +691,19 @@ local function SaveRun()
 	else notify("Save Failed: " .. tostring(err), "Error") end
 end
 
+local function SaveRunJSON()
+	if not writefile then notify("Executor does not support writefile!", "Error"); return end
+	local Data = {Savestates, PlayerInfo}
+	local fileName = GetFileName():gsub("%.tas$", ".json")
+	local success, err = pcall(function()
+		local Encoded = HttpService:JSONEncode(Data)
+		if not isfolder("TAS_Recorder") then makefolder("TAS_Recorder") end
+		writefile("TAS_Recorder/" .. fileName, Encoded)
+	end)
+	if success then notify("Saved JSON " .. fileName, "Success")
+	else notify("JSON Save Failed: " .. tostring(err), "Error") end
+end
+
 local function LoadRun(overrideName)
 	if type(overrideName) ~= "string" then overrideName = nil end
 	if not readfile then notify("Executor does not support readfile!", "Error"); return false end
@@ -700,10 +720,7 @@ local function LoadRun(overrideName)
 	local success, err = pcall(function()
 		local content = readfile("TAS_Recorder/" .. fileName)
 
-		if content:sub(1, 4) == "LZ4_" then
-			error("This file is LZ4 compressed, which is no longer supported.")
-			
-		elseif content:sub(1, 4) == "TASB" then
+		if content:sub(1, 4) == "TASB" then
 			local magic, version, pos = string.unpack("<c4 B", content)
 			
 			local unpackerFunc = nil
@@ -736,29 +753,33 @@ local function LoadRun(overrideName)
 		elseif content:sub(1, 1) == "[" or content:sub(1, 1) == "{" then
 			local loadedTAS = HttpService:JSONDecode(content)
 			if type(loadedTAS) ~= "table" or type(loadedTAS[1]) ~= "table" or type(loadedTAS[2]) ~= "table" then 
-				error("Invalid TAS legacy file format") 
+				error("Invalid TAS file format") 
 			end
 			
 			-- Translate loaded legacy formats into Quaternions on-the-fly
 			local function convertLegacy(frames)
 				for _, f in ipairs(frames) do
-					if #f.CF == 12 then
-						local cf = CFrame.new(table.unpack(f.CF))
-						local qX, qY, qZ, qW = CFrameToQuat(cf)
-						f.CF = {cf.X, cf.Y, cf.Z, qX, qY, qZ, qW}
-					elseif #f.CF == 6 then
-						local cf = CFrame.new(f.CF[1], f.CF[2], f.CF[3]) * CFrame.fromEulerAnglesYXZ(f.CF[4], f.CF[5], f.CF[6])
-						local qX, qY, qZ, qW = CFrameToQuat(cf)
-						f.CF = {cf.X, cf.Y, cf.Z, qX, qY, qZ, qW}
+					if type(f.CF) == "table" then
+						if #f.CF == 12 then
+							local cf = CFrame.new(table.unpack(f.CF))
+							local qX, qY, qZ, qW = CFrameToQuat(cf)
+							f.CF = {cf.X, cf.Y, cf.Z, qX, qY, qZ, qW}
+						elseif #f.CF == 6 then
+							local cf = CFrame.new(f.CF[1], f.CF[2], f.CF[3]) * CFrame.fromEulerAnglesYXZ(f.CF[4], f.CF[5], f.CF[6])
+							local qX, qY, qZ, qW = CFrameToQuat(cf)
+							f.CF = {cf.X, cf.Y, cf.Z, qX, qY, qZ, qW}
+						end
 					end
-					if f.CCF and #f.CCF == 12 then
-						local ccf = CFrame.new(table.unpack(f.CCF))
-						local cqX, cqY, cqZ, cqW = CFrameToQuat(ccf)
-						f.CCF = {ccf.X, ccf.Y, ccf.Z, cqX, cqY, cqZ, cqW}
-					elseif f.CCF and #f.CCF == 6 then
-						local ccf = CFrame.new(f.CCF[1], f.CCF[2], f.CCF[3]) * CFrame.fromEulerAnglesYXZ(f.CCF[4], f.CCF[5], f.CCF[6])
-						local cqX, cqY, cqZ, cqW = CFrameToQuat(ccf)
-						f.CCF = {ccf.X, ccf.Y, ccf.Z, cqX, cqY, cqZ, cqW}
+					if type(f.CCF) == "table" then
+						if #f.CCF == 12 then
+							local ccf = CFrame.new(table.unpack(f.CCF))
+							local cqX, cqY, cqZ, cqW = CFrameToQuat(ccf)
+							f.CCF = {ccf.X, ccf.Y, ccf.Z, cqX, cqY, cqZ, cqW}
+						elseif #f.CCF == 6 then
+							local ccf = CFrame.new(f.CCF[1], f.CCF[2], f.CCF[3]) * CFrame.fromEulerAnglesYXZ(f.CCF[4], f.CCF[5], f.CCF[6])
+							local cqX, cqY, cqZ, cqW = CFrameToQuat(ccf)
+							f.CCF = {ccf.X, ccf.Y, ccf.Z, cqX, cqY, cqZ, cqW}
+						end
 					end
 				end
 			end
@@ -849,7 +870,6 @@ local function ViewTASPlayback()
 
 	Root.Anchored = false 
 	
-	-- Disable non-transitional states during playback to prevent physics interference
 	if Humanoid then
 		for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
 			if not KeepEnabledStates[state] then
@@ -884,7 +904,8 @@ local function ViewTASPlayback()
 		local FrameB = FlatFrames[CurrentIndex + 1]
 		local StateFrame = FullFrames[FullCurrentIndex]
 		
-		if FrameB then
+		-- FIX: Protect the loop mathematically so malformed/nil table values instantly break execution without throwing Lua errors
+		if FrameB and type(FrameA) == "table" and type(FrameB) == "table" and FrameA.CF and FrameB.CF and FrameA.V and FrameB.V and FrameA.RV and FrameB.RV then
 			local Delta = FrameB.T - FrameA.T
 			local Alpha = 0
 			if Delta > 0 then Alpha = (Elapsed - FrameA.T) / Delta end
@@ -900,7 +921,7 @@ local function ViewTASPlayback()
 			
 			Root.CFrame = cfA:Lerp(cfB, Alpha)
 			
-			if PlaybackCamera and FrameA.CCF and FrameB.CCF then
+			if PlaybackCamera and type(FrameA.CCF) == "table" and type(FrameB.CCF) == "table" then
 				local camA = QuatToCFrame(table.unpack(FrameA.CCF))
 				local camB = QuatToCFrame(table.unpack(FrameB.CCF))
 				Workspace.CurrentCamera.CFrame = camA:Lerp(camB, Alpha)
@@ -943,7 +964,6 @@ local function ViewTASPlayback()
 			ActivePlaybackFrames = nil
 			CurrentPlaybackIndex = 1
 			
-			-- Re-enable all states naturally after playback completes
 			if Humanoid then
 				for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
 					pcall(function() Humanoid:SetStateEnabled(state, true) end)
@@ -1005,7 +1025,6 @@ DisconnectAll = function()
 		
 		local hum = char:FindFirstChild("Humanoid")
 		if hum then
-			-- Ensure states are fully restored if disconnected mid-playback
 			for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
 				pcall(function() hum:SetStateEnabled(state, true) end)
 			end
@@ -1032,7 +1051,12 @@ local function SetupCharacterConnections(char)
 	local hum = char:WaitForChild("Humanoid", 10)
 	if not hum then return end
 	
+	local diedHandled = false
+	
 	table.insert(CharConnections, hum.Died:Connect(function()
+		if diedHandled then return end
+		diedHandled = true
+		
 		local wasPlaying = getgenv().TAS_IsPlaying
 		
 		Pause = true
@@ -1092,6 +1116,7 @@ local function Initialize()
 	getgenv().TAS_IsPlaying = false
 	TimeStart = os.clock()
 	TimePauseHolder = os.clock()
+	LastRecordTime = os.clock()
 	
 	local initialData = ReturnPlayerInfo()
 	initialData.T = 0
@@ -1111,8 +1136,6 @@ local function Initialize()
 		local shouldShowVel = (not ViewingTAS and ShowVelocityDuringRecording) or (ViewingTAS and ShowVelocityDuringPlayback)
 		if shouldShowVel then
 			local now = os.clock()
-			
-			-- Throttle heavy Blockcast loop to 15Hz to prevent frame dropping
 			if now - LastTrajectoryUpdate >= 1/15 then
 				LastTrajectoryUpdate = now
 				
@@ -1258,20 +1281,23 @@ local function Initialize()
 			
 			local lineIndex = 1
 			for i = startIdx, maxFrames - 1 do
-				local p1 = Vector3.new(frames[i].CF[1], frames[i].CF[2], frames[i].CF[3])
-				local p2 = Vector3.new(frames[i+1].CF[1], frames[i+1].CF[2], frames[i+1].CF[3])
-				local dist = (p2 - p1).Magnitude
-				
-				if dist > 0.005 then 
-					local line = PathLines[lineIndex]
-					if not line then
-						line = Instance.new("CylinderHandleAdornment")
-						line.Radius = 0.06; line.Color3 = Color3.fromRGB(0, 200, 255); line.Transparency = 0.2
-						line.ZIndex = 4; line.AlwaysOnTop = false; line.Adornee = Workspace.Terrain; line.Parent = TrajectoryFolder
-						PathLines[lineIndex] = line
+				-- FIX: Math protection to ensure nil values are cleanly skipped
+				if type(frames[i]) == "table" and type(frames[i].CF) == "table" and type(frames[i+1]) == "table" and type(frames[i+1].CF) == "table" then
+					local p1 = Vector3.new(frames[i].CF[1], frames[i].CF[2], frames[i].CF[3])
+					local p2 = Vector3.new(frames[i+1].CF[1], frames[i+1].CF[2], frames[i+1].CF[3])
+					local dist = (p2 - p1).Magnitude
+					
+					if dist > 0.005 then 
+						local line = PathLines[lineIndex]
+						if not line then
+							line = Instance.new("CylinderHandleAdornment")
+							line.Radius = 0.06; line.Color3 = Color3.fromRGB(0, 200, 255); line.Transparency = 0.2
+							line.ZIndex = 4; line.AlwaysOnTop = false; line.Adornee = Workspace.Terrain; line.Parent = TrajectoryFolder
+							PathLines[lineIndex] = line
+						end
+						line.Height = dist; line.CFrame = CFrame.lookAt(p1 + (p2 - p1) / 2, p2); line.Visible = true
+						lineIndex = lineIndex + 1
 					end
-					line.Height = dist; line.CFrame = CFrame.lookAt(p1 + (p2 - p1) / 2, p2); line.Visible = true
-					lineIndex = lineIndex + 1
 				end
 			end
 			for i = lineIndex, #PathLines do PathLines[i].Visible = false end
@@ -1282,6 +1308,10 @@ local function Initialize()
 	
 	table.insert(Connections, RunService.Heartbeat:Connect(function(dt)
 		if not Pause and not ViewingTAS then
+			local now = os.clock()
+			if now - LastRecordTime < (1/60) then return end
+			LastRecordTime = now
+			
 			if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return end
 			if LocalPlayer.Character.Humanoid.Health <= 0 then return end
 
@@ -1303,7 +1333,15 @@ local function Initialize()
 		elseif Key == Keybinds.EnterSavestate then EnterSavestate()
 		elseif Key == Keybinds.BackSavestate then BackSavestate()
 		elseif Key == Keybinds.CollisionToggler then CollisionToggler()
-		elseif Key == Keybinds.SaveRun then SaveRun()
+		elseif Key == Keybinds.SaveRun then 
+			local pressId = os.clock()
+			heldInputs[Key] = pressId
+			task.delay(0.5, function()
+				if heldInputs[Key] == pressId then
+					SaveRunJSON()
+					heldInputs[Key] = nil
+				end
+			end)
 		elseif Key == Keybinds.ViewTAS then ViewTASPlayback()
 		elseif Key == Keybinds.LoadRun then LoadRun()
 		elseif Key == Keybinds.ResetToNormal then DisconnectAll()
@@ -1317,7 +1355,15 @@ local function Initialize()
 	end))
 	
 	table.insert(Connections, UserInputService.InputEnded:Connect(function(Input)
-		heldInputs[Input.KeyCode] = nil
+		local Key = Input.KeyCode
+		if Key == Keybinds.SaveRun then
+			if heldInputs[Key] then
+				SaveRun()
+				heldInputs[Key] = nil
+			end
+		else
+			heldInputs[Key] = nil
+		end
 	end))
 	
 	table.insert(Connections, LocalPlayer.CharacterAdded:Connect(SetupCharacterConnections))
