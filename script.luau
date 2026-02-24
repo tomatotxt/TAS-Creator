@@ -1,3 +1,5 @@
+--- START OF FILE Paste February 23, 2026 - 2:40PM ---
+
 --// AUTO LOAD & PLAY //--
 -- Type a file name here (e.g. "MyRun") to instantly load and play it without the GUI. Leave blank ("") to use the normal creator tools.
 local AutoLoadAndPlayFile = getgenv().AutoLoadAndPlayFile
@@ -47,14 +49,18 @@ local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
 --// UTILS //--
-local function round(num)
-	return math.floor(num * 10000 + 0.5) / 10000 -- Increased precision for TAS interpolation
-end
-
 local ValToStateName = {}
 for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
 	ValToStateName[state.Value] = state.Name
 end
+
+-- States that should NOT be disabled during playback so the character doesn't break
+local KeepEnabledStates = {
+	[Enum.HumanoidStateType.Dead] = true,
+	[Enum.HumanoidStateType.GettingUp] = true,
+	[Enum.HumanoidStateType.Landed] = true,
+	[Enum.HumanoidStateType.None] = true
+}
 
 --// CONFIGURATION //--
 local Keybinds = {
@@ -86,14 +92,16 @@ local TimePauseHolder
 local TimeStart
 local DebugView = false
 local ShowVelocityDuringRecording = true
-local OriginalVisuals = {} 
-local LastRecordTime = 0 
+
+-- WEAK TABLE to prevent memory leaks if parts are destroyed during Debug View
+local OriginalVisuals = setmetatable({}, { __mode = "k" }) 
 
 -- State Flags & Playback Variables
 getgenv().TAS_IsRecording = false 
 getgenv().TAS_IsPlaying = false 
 local ActivePlaybackFrames = nil
 local CurrentPlaybackIndex = 1
+local LastTrajectoryUpdate = 0
 
 --// GUI OBJECTS //--
 local HUD
@@ -105,7 +113,7 @@ local PathLines = {}
 --// CONNECTIONS //--
 local Connections = {}
 local CharConnections = {} 
-local PlayConn -- Tracks the playback loop so we can cancel it directly
+local PlayConn 
 
 --// HELPER FUNCTIONS //--
 local function notify(text, title, dur)
@@ -149,17 +157,34 @@ local function updateStatusColor()
 	else MainFrame.BorderColor3 = Color3.fromRGB(255, 50, 50) end
 end
 
+--// MATH UTILS //--
+local function CFrameToQuat(cf)
+	-- Quaternions eliminate Gimbal Lock at ±90 pitch completely natively
+	local axis, angle = cf:ToAxisAngle()
+	local sinHalf = math.sin(angle/2)
+	return axis.X * sinHalf, axis.Y * sinHalf, axis.Z * sinHalf, math.cos(angle/2)
+end
+
+local function QuatToCFrame(x, y, z, qX, qY, qZ, qW)
+	-- Roblox supports Quaternion CFrames natively: CFrame.new(x, y, z, qX, qY, qZ, qW)
+	return CFrame.new(x, y, z, qX, qY, qZ, qW)
+end
+
 --// DEBUG VIEW LOGIC //--
 local function ToggleDebugView()
 	DebugView = not DebugView
 	if DebugView then
 		notify("Debug View: Enabled", "TAS Tools")
-		OriginalVisuals = {}
-		for _, v in ipairs(Workspace:GetDescendants()) do
+		OriginalVisuals = setmetatable({}, { __mode = "k" })
+		
+		local descendants = Workspace:GetDescendants()
+		for i, v in ipairs(descendants) do
+			if i % 500 == 0 then task.wait() end -- Added yield to prevent client freezing
+			if not DebugView then return end -- Abort if toggled off mid-yield
+			
 			if v:IsA("BasePart") and not v:IsDescendantOf(LocalPlayer.Character) then
 				OriginalVisuals[v] = {Color = v.Color, Transparency = v.Transparency}
 				
-				-- Deeply varied gray shades (thousands of variations for border contrast)
 				local gray = math.random(200, 800) / 1000
 				v.Color = Color3.new(gray, gray, gray)
 				
@@ -167,24 +192,13 @@ local function ToggleDebugView()
 				if v.CanCollide == false then v.Transparency = 0.9 end
 				
 				local minSize = math.min(v.Size.X, v.Size.Y, v.Size.Z)
-				
-				-- Check for TouchInterest first (Killbricks/Teleporters)
 				if v:FindFirstChild("TouchInterest") then 
-					-- Immensely varied shades of RED
 					v.Color = Color3.fromRGB(math.random(100, 255), math.random(0, 50), math.random(0, 50))
 					v.Transparency = 0 
-					
-				-- Check for parts less than 1 stud thick
 				elseif minSize < 1 then
-					-- Random color (except cyan) with random brightness/darkness using HSV
-					local h
-					repeat
-						h = math.random()
-					until h < 0.45 or h > 0.55 -- Skip the cyan hue range (~0.5)
-					
-					local s = math.random(40, 100) / 100 -- Random saturation
-					local val = math.random(20, 100) / 100 -- Random brightness/darkness
-					
+					local h; repeat h = math.random() until h < 0.45 or h > 0.55 
+					local s = math.random(40, 100) / 100 
+					local val = math.random(20, 100) / 100 
 					v.Color = Color3.fromHSV(h, s, val)
 				end
 			end
@@ -194,7 +208,7 @@ local function ToggleDebugView()
 		for part, props in pairs(OriginalVisuals) do
 			if part and part.Parent then part.Color = props.Color; part.Transparency = props.Transparency end
 		end
-		OriginalVisuals = {}
+		OriginalVisuals = setmetatable({}, { __mode = "k" })
 	end
 end
 
@@ -209,24 +223,18 @@ local function ReturnPlayerInfo()
 	local rvel = root and root.RotVelocity or Vector3.zero
 	local camCf = Workspace.CurrentCamera.CFrame
 	
-	-- Save numeric enum value (18 is the value for Enum.HumanoidStateType.None)
 	local hs = hum and hum:GetState().Value or 18
 	
-	-- FIX: Only round position vector components (X, Y, Z). 
-	-- Rounding the rotation matrix breaks matrix orthogonality, causing micro-drift over time.
-	local cfComps = {cf:GetComponents()}
-	for i = 1, 3 do cfComps[i] = round(cfComps[i]) end
-	
-	local camComps = {camCf:GetComponents()}
-	for i = 1, 3 do camComps[i] = round(camComps[i]) end
+	-- Convert Rotations into Quaternions
+	local qX, qY, qZ, qW = CFrameToQuat(cf)
+	local cqX, cqY, cqZ, cqW = CFrameToQuat(camCf)
 
 	return {
-		CF = cfComps,
-		CCF = camComps,
-		V = {round(vel.X), round(vel.Y), round(vel.Z)},
-		RV = {round(rvel.X), round(rvel.Y), round(rvel.Z)},
-		HS = hs,
-		T = round(os.clock() - TimeStart - TimePaused)
+		CF = {cf.X, cf.Y, cf.Z, qX, qY, qZ, qW}, 
+		CCF = {camCf.X, camCf.Y, camCf.Z, cqX, cqY, cqZ, cqW},
+		V = {vel.X, vel.Y, vel.Z},
+		RV = {rvel.X, rvel.Y, rvel.Z},
+		HS = hs, T = os.clock() - TimeStart - TimePaused
 	}
 end
 
@@ -364,12 +372,12 @@ local function SetUpGui()
 	AddKeyLabel(Keybinds.BackSavestate.Name, "Load Last Savestate")
 	AddKeyLabel(Keybinds.GoFrameBack.Name, "-1 Frame")
 	AddKeyLabel(Keybinds.GoFrameForward.Name, "+1 Frame")
-	AddKeyLabel(Keybinds.SaveRun.Name, "Save JSON")
+	AddKeyLabel(Keybinds.SaveRun.Name, "Save Run")
 	AddKeyLabel(Keybinds.CollisionToggler.Name, "Toggle Collision")
 	AddKeyLabel(Keybinds.DebugToggler.Name, "Debug View (Colors)")
 	AddKeyLabel(Keybinds.ToggleVelocityVis.Name, "Toggle Velocity Vis")
 	AddKeyLabel(Keybinds.ViewTAS.Name, "Playback TAS")
-	AddKeyLabel(Keybinds.LoadRun.Name, "Load JSON")
+	AddKeyLabel(Keybinds.LoadRun.Name, "Load Run")
 	AddKeyLabel(Keybinds.ResetToNormal.Name, "STOP SCRIPT")
 
 	KeybindsButton.MouseButton1Click:Connect(function()
@@ -384,13 +392,11 @@ local function SetCharacterState(InfoState)
 	local Hum = LocalPlayer.Character:FindFirstChild("Humanoid")
 	if not Root then return end
 
-	local charCF = CFrame.new(unpack(InfoState.CF))
-	local vel = Vector3.new(unpack(InfoState.V))
-	local rvel = Vector3.new(unpack(InfoState.RV))
+	local charCF = QuatToCFrame(table.unpack(InfoState.CF))
+	local vel = Vector3.new(table.unpack(InfoState.V))
+	local rvel = Vector3.new(table.unpack(InfoState.RV))
 
 	Root.CFrame = charCF
-	
-	-- Apply physics exactly to all limbs for flawless visual state reproduction
 	for _, part in ipairs(LocalPlayer.Character:GetDescendants()) do
 		if part:IsA("BasePart") then
 			part.Velocity = vel
@@ -398,11 +404,8 @@ local function SetCharacterState(InfoState)
 		end
 	end
 
-	-- Backwards compatible decode
 	local hsName = type(InfoState.HS) == "number" and ValToStateName[InfoState.HS] or InfoState.HS
-
 	if Hum and hsName and hsName ~= "None" then
-		-- Only ever call ChangeState if the current state strictly mismatches
 		if Hum:GetState().Name ~= hsName then
 			pcall(function() Hum:ChangeState(Enum.HumanoidStateType[hsName]) end)
 		end
@@ -432,8 +435,16 @@ end
 
 --// RECORDING FUNCTIONS //--
 local function AddSavestate()
-	local CurrentPlayerInfoCopy = HttpService:JSONDecode(HttpService:JSONEncode(PlayerInfo))
-	table.insert(Savestates, CurrentPlayerInfoCopy)
+	local stateCopy = table.create and table.create(#PlayerInfo) or {}
+	for i, v in ipairs(PlayerInfo) do
+		stateCopy[i] = {
+			T = v.T, HS = v.HS,
+			V = {v.V[1], v.V[2], v.V[3]},
+			RV = {v.RV[1], v.RV[2], v.RV[3]},
+			CF = {table.unpack(v.CF)}, CCF = {table.unpack(v.CCF)}
+		}
+	end
+	table.insert(Savestates, stateCopy)
 	PlayerInfo = {}
 	UpdateGUIText()
 	notify("Savestate Added", "TAS", 1)
@@ -549,10 +560,8 @@ local function GoFrameBack()
 	end
 end
 
---// REPEATED INPUT HANDLERS //--
 local heldInputs = {}
 local function handleHold(key, action)
-	-- FIX: Prevent concurrency duplication by tying the loop to a unique execution ID
 	local pressId = os.clock()
 	heldInputs[key] = pressId
 	action()
@@ -563,28 +572,114 @@ local function handleHold(key, action)
 	end
 end
 
---// IO FUNCTIONS //--
+--// IO FUNCTIONS (Quaternion Packed Binary Format) //--
 local function GetFileName(overrideName)
 	if overrideName and overrideName ~= "" then
 		local name = overrideName:gsub("^%s*(.-)%s*$", "%1")
-		if not name:match("%.json$") then name = name .. ".json" end
+		if not name:match("%.json$") and not name:match("%.tas$") then name = name .. ".tas" end
 		return name
 	end
 	local rawName = TASNameBox and TASNameBox.Text or "Untitled"
 	local cleanName = rawName:gsub("%p", ""):gsub("^%s*(.-)%s*$", "%1")
 	if cleanName == "" then cleanName = "Untitled" end
-	return cleanName .. ".json"
+	return cleanName .. ".tas"
+end
+
+-- V3 Format: 1 Float(T), 1 Byte(HS), 20 Floats(V, RV, CF[Pos,Quat], CCF[Pos,Quat]) = 85 Bytes Total
+local FRAME_PACK_FMT_V3 = "<f B " .. string.rep("f", 20)
+-- Legacy formats
+local FRAME_PACK_FMT_V2 = "<f B " .. string.rep("f", 18)
+local FRAME_PACK_FMT_V1 = "<f B " .. string.rep("f", 30)
+
+local function PackFrame(frame)
+	return string.pack(FRAME_PACK_FMT_V3,
+		frame.T, frame.HS,
+		frame.V[1], frame.V[2], frame.V[3],
+		frame.RV[1], frame.RV[2], frame.RV[3],
+		frame.CF[1], frame.CF[2], frame.CF[3], frame.CF[4], frame.CF[5], frame.CF[6], frame.CF[7],
+		frame.CCF[1], frame.CCF[2], frame.CCF[3], frame.CCF[4], frame.CCF[5], frame.CCF[6], frame.CCF[7]
+	)
+end
+
+local function UnpackFrameV3(data, pos)
+	local t, hs, v1, v2, v3, rv1, rv2, rv3,
+		cf1, cf2, cf3, cf4, cf5, cf6, cf7,
+		ccf1, ccf2, ccf3, ccf4, ccf5, ccf6, ccf7,
+		nextPos = string.unpack(FRAME_PACK_FMT_V3, data, pos)
+
+	return {
+		T = t, HS = hs,
+		V = {v1, v2, v3}, RV = {rv1, rv2, rv3},
+		CF = {cf1, cf2, cf3, cf4, cf5, cf6, cf7},
+		CCF = {ccf1, ccf2, ccf3, ccf4, ccf5, ccf6, ccf7}
+	}, nextPos
+end
+
+local function UnpackFrameV2(data, pos)
+	local t, hs, v1, v2, v3, rv1, rv2, rv3,
+		cf1, cf2, cf3, cf4, cf5, cf6,
+		ccf1, ccf2, ccf3, ccf4, ccf5, ccf6,
+		nextPos = string.unpack(FRAME_PACK_FMT_V2, data, pos)
+
+	local cf = CFrame.new(cf1, cf2, cf3) * CFrame.fromEulerAnglesYXZ(cf4, cf5, cf6)
+	local ccf = CFrame.new(ccf1, ccf2, ccf3) * CFrame.fromEulerAnglesYXZ(ccf4, ccf5, ccf6)
+	local qX, qY, qZ, qW = CFrameToQuat(cf)
+	local cqX, cqY, cqZ, cqW = CFrameToQuat(ccf)
+
+	return {
+		T = t, HS = hs,
+		V = {v1, v2, v3}, RV = {rv1, rv2, rv3},
+		CF = {cf.X, cf.Y, cf.Z, qX, qY, qZ, qW},
+		CCF = {ccf.X, ccf.Y, ccf.Z, cqX, cqY, cqZ, cqW}
+	}, nextPos
+end
+
+local function UnpackFrameV1(data, pos)
+	local t, hs, v1, v2, v3, rv1, rv2, rv3,
+		cf1, cf2, cf3, cf4, cf5, cf6, cf7, cf8, cf9, cf10, cf11, cf12,
+		ccf1, ccf2, ccf3, ccf4, ccf5, ccf6, ccf7, ccf8, ccf9, ccf10, ccf11, ccf12,
+		nextPos = string.unpack(FRAME_PACK_FMT_V1, data, pos)
+
+	local cf = CFrame.new(cf1, cf2, cf3, cf4, cf5, cf6, cf7, cf8, cf9, cf10, cf11, cf12)
+	local ccf = CFrame.new(ccf1, ccf2, ccf3, ccf4, ccf5, ccf6, ccf7, ccf8, ccf9, ccf10, ccf11, ccf12)
+	local qX, qY, qZ, qW = CFrameToQuat(cf)
+	local cqX, cqY, cqZ, cqW = CFrameToQuat(ccf)
+
+	return {
+		T = t, HS = hs,
+		V = {v1, v2, v3}, RV = {rv1, rv2, rv3},
+		CF = {cf.X, cf.Y, cf.Z, qX, qY, qZ, qW},
+		CCF = {ccf.X, ccf.Y, ccf.Z, cqX, cqY, cqZ, cqW}
+	}, nextPos
 end
 
 local function SaveRun()
 	if not writefile then notify("Executor does not support writefile!", "Error"); return end
-	local Data = {Savestates, PlayerInfo}
 	local fileName = GetFileName()
 	local success, err = pcall(function()
-		local Encoded = HttpService:JSONEncode(Data)
+		local chunks = {}
+		-- Header: TASB (Magic), 3 (Quaternion Version)
+		table.insert(chunks, string.pack("<c4 B", "TASB", 3))
+
+		table.insert(chunks, string.pack("<I4", #Savestates))
+		for _, stateList in ipairs(Savestates) do
+			table.insert(chunks, string.pack("<I4", #stateList))
+			for _, frame in ipairs(stateList) do
+				table.insert(chunks, PackFrame(frame))
+			end
+		end
+
+		table.insert(chunks, string.pack("<I4", #PlayerInfo))
+		for _, frame in ipairs(PlayerInfo) do
+			table.insert(chunks, PackFrame(frame))
+		end
+
+		local binData = table.concat(chunks)
+
 		if not isfolder("TAS_Recorder") then makefolder("TAS_Recorder") end
-		writefile("TAS_Recorder/" .. fileName, Encoded)
+		writefile("TAS_Recorder/" .. fileName, binData)
 	end)
+	
 	if success then notify("Saved " .. fileName, "Success")
 	else notify("Save Failed: " .. tostring(err), "Error") end
 end
@@ -595,23 +690,88 @@ local function LoadRun(overrideName)
 	
 	local fileName = GetFileName(overrideName)
 	if not isfile("TAS_Recorder/" .. fileName) then
-		notify("File not found: TAS_Recorder/" .. fileName, "Error")
-		return false
+		fileName = fileName:gsub("%.tas$", ".json")
+		if not isfile("TAS_Recorder/" .. fileName) then
+			notify("File not found!", "Error")
+			return false
+		end
 	end
 	
 	local success, err = pcall(function()
 		local content = readfile("TAS_Recorder/" .. fileName)
-		local loadedTAS = HttpService:JSONDecode(content)
-		
-		-- FIX: Strict structural validation
-		if type(loadedTAS) ~= "table" or type(loadedTAS[1]) ~= "table" or type(loadedTAS[2]) ~= "table" then 
-			error("Invalid TAS file format") 
+
+		if content:sub(1, 4) == "LZ4_" then
+			error("This file is LZ4 compressed, which is no longer supported.")
+			
+		elseif content:sub(1, 4) == "TASB" then
+			local magic, version, pos = string.unpack("<c4 B", content)
+			
+			local unpackerFunc = nil
+			if version == 3 then unpackerFunc = UnpackFrameV3
+			elseif version == 2 then unpackerFunc = UnpackFrameV2
+			elseif version == 1 then unpackerFunc = UnpackFrameV1
+			else error("Unsupported TAS binary version") end
+
+			local numSavestates
+			numSavestates, pos = string.unpack("<I4", content, pos)
+			Savestates = table.create and table.create(numSavestates) or {}
+			
+			for i = 1, numSavestates do
+				local numFrames
+				numFrames, pos = string.unpack("<I4", content, pos)
+				local stateList = table.create and table.create(numFrames) or {}
+				for j = 1, numFrames do
+					stateList[j], pos = unpackerFunc(content, pos)
+				end
+				Savestates[i] = stateList
+			end
+
+			local numPlayerFrames
+			numPlayerFrames, pos = string.unpack("<I4", content, pos)
+			PlayerInfo = table.create and table.create(numPlayerFrames) or {}
+			for i = 1, numPlayerFrames do
+				PlayerInfo[i], pos = unpackerFunc(content, pos)
+			end
+
+		elseif content:sub(1, 1) == "[" or content:sub(1, 1) == "{" then
+			local loadedTAS = HttpService:JSONDecode(content)
+			if type(loadedTAS) ~= "table" or type(loadedTAS[1]) ~= "table" or type(loadedTAS[2]) ~= "table" then 
+				error("Invalid TAS legacy file format") 
+			end
+			
+			-- Translate loaded legacy formats into Quaternions on-the-fly
+			local function convertLegacy(frames)
+				for _, f in ipairs(frames) do
+					if #f.CF == 12 then
+						local cf = CFrame.new(table.unpack(f.CF))
+						local qX, qY, qZ, qW = CFrameToQuat(cf)
+						f.CF = {cf.X, cf.Y, cf.Z, qX, qY, qZ, qW}
+					elseif #f.CF == 6 then
+						local cf = CFrame.new(f.CF[1], f.CF[2], f.CF[3]) * CFrame.fromEulerAnglesYXZ(f.CF[4], f.CF[5], f.CF[6])
+						local qX, qY, qZ, qW = CFrameToQuat(cf)
+						f.CF = {cf.X, cf.Y, cf.Z, qX, qY, qZ, qW}
+					end
+					if f.CCF and #f.CCF == 12 then
+						local ccf = CFrame.new(table.unpack(f.CCF))
+						local cqX, cqY, cqZ, cqW = CFrameToQuat(ccf)
+						f.CCF = {ccf.X, ccf.Y, ccf.Z, cqX, cqY, cqZ, cqW}
+					elseif f.CCF and #f.CCF == 6 then
+						local ccf = CFrame.new(f.CCF[1], f.CCF[2], f.CCF[3]) * CFrame.fromEulerAnglesYXZ(f.CCF[4], f.CCF[5], f.CCF[6])
+						local cqX, cqY, cqZ, cqW = CFrameToQuat(ccf)
+						f.CCF = {ccf.X, ccf.Y, ccf.Z, cqX, cqY, cqZ, cqW}
+					end
+				end
+			end
+			
+			Savestates = loadedTAS[1]
+			for _, st in ipairs(Savestates) do convertLegacy(st) end
+			
+			PlayerInfo = loadedTAS[2]
+			convertLegacy(PlayerInfo)
+		else
+			error("Unrecognized or corrupted TAS file format.")
 		end
-		
-		Savestates = loadedTAS[1]
-		PlayerInfo = loadedTAS[2]
-		
-		-- Load the run into memory silently, do not artificially advance physics frames
+
 		TimeStart = os.clock()
 		TimePaused = 0
 		TimePauseHolder = os.clock()
@@ -633,9 +793,7 @@ local function LoadRun(overrideName)
 	end
 end
 
---// INITIALIZATION (Forward Declaration) //--
-local DisconnectAll
-
+--// PLAYBACK LOGIC //--
 local function ViewTASPlayback()
 	if ViewingTAS then return end
 	
@@ -651,10 +809,8 @@ local function ViewTASPlayback()
 		return 
 	end
 
-	-- Maintain a parallel reference to the original raw 60fps frames for absolute State precision
 	local FullFrames = FlatFrames
 
-	-- EXTREME SMOOTHING LOGIC (Downsampling Positional Frames)
 	if ExtremeSmoothing then
 		local smoothedFrames = {}
 		local interval = 1 / math.max(0.001, TargetSmoothingFPS)
@@ -693,29 +849,33 @@ local function ViewTASPlayback()
 
 	Root.Anchored = false 
 	
+	-- Disable non-transitional states during playback to prevent physics interference
+	if Humanoid then
+		for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
+			if not KeepEnabledStates[state] then
+				pcall(function() Humanoid:SetStateEnabled(state, false) end)
+			end
+		end
+	end
+	
 	local StartPlay = os.clock()
 	local CurrentIndex = 1
 	local FullCurrentIndex = 1
 	
 	if PlayConn then PlayConn:Disconnect() end
 	
-	-- Utilizing Heartbeat: Because Root is unanchored, Heartbeat updates CFrame and Velocity 
-	-- *after* the physics step but without blocking the Render thread, causing optimal visual smoothness.
 	PlayConn = RunService.Heartbeat:Connect(function()
-		-- Graceful death handling: Stop if character breaks/dies during playback
 		if not Character or not Character.Parent or not Root or not Root.Parent or (Humanoid and Humanoid.Health <= 0) then
-			return -- Let the hum.Died event safely handle the rest
+			return 
 		end
 		
 		local Elapsed = os.clock() - StartPlay
 		
-		-- Advance Positional Interpolation Frame (Smoothed)
 		while CurrentIndex < #FlatFrames and FlatFrames[CurrentIndex + 1] and FlatFrames[CurrentIndex + 1].T <= Elapsed do
 			CurrentIndex = CurrentIndex + 1
 			CurrentPlaybackIndex = CurrentIndex
 		end
 		
-		-- Advance State Frame (Raw 60fps)
 		while FullCurrentIndex < #FullFrames and FullFrames[FullCurrentIndex + 1] and FullFrames[FullCurrentIndex + 1].T <= Elapsed do
 			FullCurrentIndex = FullCurrentIndex + 1
 		end
@@ -725,30 +885,27 @@ local function ViewTASPlayback()
 		local StateFrame = FullFrames[FullCurrentIndex]
 		
 		if FrameB then
-			-- Perfectly interpolates the elapsed time mathematically for smoothed positional visuals
 			local Delta = FrameB.T - FrameA.T
 			local Alpha = 0
 			if Delta > 0 then Alpha = (Elapsed - FrameA.T) / Delta end
 			Alpha = math.clamp(Alpha, 0, 1)
 			
-			local cfA = CFrame.new(unpack(FrameA.CF))
-			local cfB = CFrame.new(unpack(FrameB.CF))
-			local velA = Vector3.new(unpack(FrameA.V))
-			local velB = Vector3.new(unpack(FrameB.V))
-			local rvelA = Vector3.new(unpack(FrameA.RV))
-			local rvelB = Vector3.new(unpack(FrameB.RV))
+			local cfA = QuatToCFrame(table.unpack(FrameA.CF))
+			local cfB = QuatToCFrame(table.unpack(FrameB.CF))
 			
-			-- Spherical Linear Interpolation for pure rotational CFrame precision
+			local velA = Vector3.new(table.unpack(FrameA.V))
+			local velB = Vector3.new(table.unpack(FrameB.V))
+			local rvelA = Vector3.new(table.unpack(FrameA.RV))
+			local rvelB = Vector3.new(table.unpack(FrameB.RV))
+			
 			Root.CFrame = cfA:Lerp(cfB, Alpha)
 			
-			-- Apply Camera playback if enabled
 			if PlaybackCamera and FrameA.CCF and FrameB.CCF then
-				local camA = CFrame.new(unpack(FrameA.CCF))
-				local camB = CFrame.new(unpack(FrameB.CCF))
+				local camA = QuatToCFrame(table.unpack(FrameA.CCF))
+				local camB = QuatToCFrame(table.unpack(FrameB.CCF))
 				Workspace.CurrentCamera.CFrame = camA:Lerp(camB, Alpha)
 			end
 			
-			-- Accurately apply exact playback velocity to all limbs so hitboxes and physics flow smoothly
 			local curV = velA:Lerp(velB, Alpha)
 			local curRV = rvelA:Lerp(rvelB, Alpha)
 			for _, part in ipairs(Character:GetDescendants()) do
@@ -758,13 +915,11 @@ local function ViewTASPlayback()
 				end
 			end
 
-			-- Forceably check and inject Humanoid state on EVERY single frame using full 60FPS data!
 			if Humanoid and StateFrame and StateFrame.HS then
 				local targetStateName = type(StateFrame.HS) == "number" and ValToStateName[StateFrame.HS] or StateFrame.HS
 				
 				if targetStateName and targetStateName ~= "None" then
 					local currentState = Humanoid:GetState().Name
-					-- Only ever call ChangeState if the current state strictly mismatches
 					if currentState ~= targetStateName then
 						local targetStateEnum = Enum.HumanoidStateType[targetStateName]
 						if targetStateEnum then
@@ -774,13 +929,11 @@ local function ViewTASPlayback()
 				end
 			end
 		else
-			-- IF AUTO LOAD PLAYING: Clean everything up and unanchor
 			if AutoLoadAndPlayFile and AutoLoadAndPlayFile ~= "" then
 				DisconnectAll()
 				return
 			end
 			
-			-- IF MANUAL TAS CREATOR: End playback cleanly but remain paused for further editing
 			PlayConn:Disconnect()
 			PlayConn = nil
 			ViewingTAS = false
@@ -790,9 +943,16 @@ local function ViewTASPlayback()
 			ActivePlaybackFrames = nil
 			CurrentPlaybackIndex = 1
 			
-			-- Cleanup getting up state with checks
-			if Humanoid and Humanoid:GetState() ~= Enum.HumanoidStateType.GettingUp then
-				pcall(function() Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+			-- Re-enable all states naturally after playback completes
+			if Humanoid then
+				for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
+					pcall(function() Humanoid:SetStateEnabled(state, true) end)
+				end
+				pcall(function()
+					if Humanoid:GetState() ~= Enum.HumanoidStateType.GettingUp then
+						Humanoid:ChangeState(Enum.HumanoidStateType.GettingUp)
+					end
+				end)
 			end
 
 			updateStatusColor()
@@ -844,8 +1004,16 @@ DisconnectAll = function()
 		end
 		
 		local hum = char:FindFirstChild("Humanoid")
-		if hum and hum:GetState() ~= Enum.HumanoidStateType.GettingUp then
-			pcall(function() hum:ChangeState(Enum.HumanoidStateType.GettingUp) end)
+		if hum then
+			-- Ensure states are fully restored if disconnected mid-playback
+			for _, state in ipairs(Enum.HumanoidStateType:GetEnumItems()) do
+				pcall(function() hum:SetStateEnabled(state, true) end)
+			end
+			pcall(function()
+				if hum:GetState() ~= Enum.HumanoidStateType.GettingUp then
+					hum:ChangeState(Enum.HumanoidStateType.GettingUp)
+				end
+			end)
 		end
 	end
 
@@ -864,7 +1032,6 @@ local function SetupCharacterConnections(char)
 	local hum = char:WaitForChild("Humanoid", 10)
 	if not hum then return end
 	
-	-- Graceful Death Handling
 	table.insert(CharConnections, hum.Died:Connect(function()
 		local wasPlaying = getgenv().TAS_IsPlaying
 		
@@ -889,28 +1056,30 @@ local function SetupCharacterConnections(char)
 		updateStatusColor()
 		notify("Character Died! Paused. Waiting for Respawn...", "TAS Warning", 5)
 		
-		local newChar = LocalPlayer.CharacterAdded:Wait()
-		local newRoot = newChar:WaitForChild("HumanoidRootPart", 10)
-		task.wait(0.5) 
-		
-		local lastState = nil
-		if #PlayerInfo > 0 then
-			lastState = PlayerInfo[#PlayerInfo]
-		elseif #Savestates > 0 then
-			local lastList = Savestates[#Savestates]
-			if lastList and #lastList > 0 then
-				lastState = lastList[#lastList]
+		task.spawn(function()
+			local newChar = LocalPlayer.CharacterAdded:Wait()
+			local newRoot = newChar:WaitForChild("HumanoidRootPart", 10)
+			task.wait(0.5) 
+			
+			local lastState = nil
+			if #PlayerInfo > 0 then
+				lastState = PlayerInfo[#PlayerInfo]
+			elseif #Savestates > 0 then
+				local lastList = Savestates[#Savestates]
+				if lastList and #lastList > 0 then
+					lastState = lastList[#lastList]
+				end
 			end
-		end
-		
-		if lastState then
-			SetCharacterState(lastState)
-			notify("Restored Position. Press '8' to Undo death, or Unpause to continue.", "TAS System", 8)
-		end
-		
-		Pause = true
-		if newRoot then newRoot.Anchored = true end
-		updateStatusColor()
+			
+			if lastState then
+				SetCharacterState(lastState)
+				notify("Restored Position. Press '8' to Undo death, or Unpause to continue.", "TAS System", 8)
+			end
+			
+			Pause = true
+			if newRoot then newRoot.Anchored = true end
+			updateStatusColor()
+		end)
 	end))
 end
 
@@ -928,243 +1097,191 @@ local function Initialize()
 	initialData.T = 0
 	table.insert(Savestates, {initialData})
 	
-	-- Setup Visualizer Trajectory Folder
 	TrajectoryFolder = Instance.new("Folder")
 	TrajectoryFolder.Name = "TAS_Trajectory"
 	TrajectoryFolder.Parent = Workspace:FindFirstChild("Terrain") or Workspace
 	
 	local isAuto = (AutoLoadAndPlayFile and AutoLoadAndPlayFile ~= "")
-	
-	-- Only generate UI if not in Auto-Play mode
 	if not isAuto then
 		SetUpGui()
 		updateStatusColor()
 	end
 	
-	-- Render visualizers smoothly (Post-Physics execution)
 	table.insert(Connections, RunService.Heartbeat:Connect(function()
-		
-		-- 1. VELOCITY TRAJECTORY PREDICTION
 		local shouldShowVel = (not ViewingTAS and ShowVelocityDuringRecording) or (ViewingTAS and ShowVelocityDuringPlayback)
-		
 		if shouldShowVel then
-			local char = LocalPlayer.Character
-			local root = char and char:FindFirstChild("HumanoidRootPart")
-			local hum = char and char:FindFirstChild("Humanoid")
+			local now = os.clock()
 			
-			if root and hum and (root.Velocity.Magnitude > 0.5 or hum.MoveDirection.Magnitude > 0.1) then
-				local p = root.Position
-				local v = root.Velocity
+			-- Throttle heavy Blockcast loop to 15Hz to prevent frame dropping
+			if now - LastTrajectoryUpdate >= 1/15 then
+				LastTrajectoryUpdate = now
 				
-				-- Roblox internal physics perfectly documented values
-				local dt240 = 1 / 240
-				local grav = Vector3.new(0, -196.2, 0)
+				local char = LocalPlayer.Character
+				local root = char and char:FindFirstChild("HumanoidRootPart")
+				local hum = char and char:FindFirstChild("Humanoid")
 				
-				local rayParams = RaycastParams.new()
-				rayParams.FilterType = Enum.RaycastFilterType.Exclude
-				rayParams.FilterDescendantsInstances = {char}
-				rayParams.RespectCanCollide = true
-				
-				local points = {p}
-				local velocities = {v}
-				
-				-- Blockcast sizes matching character collision boundaries exactly
-				local charRot = root.CFrame.Rotation
-				local floorBox = Vector3.new(1.5, 0.2, 1.5) 
-				local wallBox = Vector3.new(1.5, 4.5, 1.5)  
-				
-				local feetOffset = Vector3.new(0, -3.1, 0)
-				local walkSpeed = hum.WalkSpeed
-				
-				-- When recording, use actual MoveDirection. When playing back, guess intended direction based on velocity
-				local targetDir = hum.MoveDirection
-				local isHoldingJump = false
-				
-				if ViewingTAS then
-					local flatV = Vector3.new(v.X, 0, v.Z)
-					if flatV.Magnitude > 0.5 then
-						targetDir = flatV.Unit
+				if root and hum and (root.Velocity.Magnitude > 0.5 or hum.MoveDirection.Magnitude > 0.1) then
+					local p = root.Position
+					local v = root.Velocity
+					local dt240 = 1 / 240
+					local grav = Vector3.new(0, -196.2, 0)
+					
+					local rayParams = RaycastParams.new()
+					rayParams.FilterType = Enum.RaycastFilterType.Exclude
+					rayParams.FilterDescendantsInstances = {char}
+					rayParams.RespectCanCollide = true
+					
+					local points = {p}
+					local velocities = {v}
+					
+					local charRot = root.CFrame.Rotation
+					local floorBox = Vector3.new(1.5, 0.2, 1.5) 
+					local wallBox = Vector3.new(1.5, 4.5, 1.5)  
+					local feetOffset = Vector3.new(0, -3.1, 0)
+					local walkSpeed = hum.WalkSpeed
+					
+					local targetDir = hum.MoveDirection
+					local isHoldingJump = false
+					
+					if ViewingTAS then
+						local flatV = Vector3.new(v.X, 0, v.Z)
+						if flatV.Magnitude > 0.5 then targetDir = flatV.Unit else targetDir = Vector3.zero end
+						isHoldingJump = false
 					else
-						targetDir = Vector3.zero
+						isHoldingJump = UserInputService:IsKeyDown(Enum.KeyCode.Space) or hum.Jump
 					end
-					isHoldingJump = false
+					
+					local targetVXZ = targetDir * walkSpeed
+					local jumpVelocity = 50
+					pcall(function()
+						if hum.UseJumpPower then jumpVelocity = hum.JumpPower
+						else jumpVelocity = math.sqrt(2 * Workspace.Gravity * hum.JumpHeight) end
+					end)
+					
+					local airAccelStep = 0.59584 * (walkSpeed / 16)
+					local groundFactorTarget = 0.625
+					local groundFactorCurrent = 0.375
+					
+					local jumpTimer = 0
+					local currentState = hum:GetState()
+					if currentState == Enum.HumanoidStateType.Freefall or currentState == Enum.HumanoidStateType.Jumping or currentState == Enum.HumanoidStateType.FallingDown then
+						jumpTimer = 15
+					end
+					if v.Y > 10 then jumpTimer = 15 end
+					
+					for frame = 1, MaxTrajectoryFrames do
+						local hitSomething = false
+						for step = 1, 4 do
+							local currVXZ = Vector3.new(v.X, 0, v.Z)
+							local floorHit = nil
+							
+							if jumpTimer == 0 then
+								floorHit = Workspace:Blockcast(CFrame.new(p) * charRot, floorBox, feetOffset, rayParams)
+							end
+							
+							if floorHit then
+								currVXZ = (currVXZ * groundFactorCurrent) + (targetVXZ * groundFactorTarget)
+								if isHoldingJump then
+									v = Vector3.new(currVXZ.X, jumpVelocity, currVXZ.Z)
+									jumpTimer = 15
+								else
+									local normal = floorHit.Normal
+									v = currVXZ - (currVXZ:Dot(normal) * normal)
+								end
+							else
+								if jumpTimer > 0 then jumpTimer = jumpTimer - 1 end
+								local diff = targetVXZ - currVXZ
+								if diff.Magnitude > 0 then
+									local accelStep = math.min(diff.Magnitude, airAccelStep)
+									currVXZ = currVXZ + (diff.Unit * accelStep)
+								end
+								v = Vector3.new(currVXZ.X, v.Y, currVXZ.Z) + (grav * dt240)
+							end
+							
+							local stepVec = v * dt240
+							if stepVec.Magnitude > 0.0001 then
+								local hitCenter = Workspace:Blockcast(CFrame.new(p) * charRot, wallBox, stepVec, rayParams)
+								if hitCenter then
+									p = p + (stepVec.Unit * hitCenter.Distance)
+									hitSomething = true
+									break
+								else
+									p = p + stepVec
+								end
+							end
+						end
+						
+						table.insert(points, p)
+						table.insert(velocities, v)
+						if hitSomething then break end
+						if (not isHoldingJump) and v.Magnitude <= 1 and targetVXZ.Magnitude < 0.5 then break end
+					end
+					
+					local ws = hum.WalkSpeed > 0 and hum.WalkSpeed or 16
+					for i = 1, #points - 1 do
+						local line = TrajectoryLines[i]
+						if not line then
+							line = Instance.new("CylinderHandleAdornment")
+							line.Radius = 0.08; line.ZIndex = 5; line.AlwaysOnTop = false
+							line.Adornee = Workspace.Terrain; line.Parent = TrajectoryFolder
+							TrajectoryLines[i] = line
+						end
+						
+						local p1, p2 = points[i], points[i+1]
+						local length = (p2 - p1).Magnitude
+						local mag = velocities[i].Magnitude
+						
+						if length > 0.001 then
+							line.Height = length
+							line.CFrame = CFrame.lookAt(p1 + (p2 - p1) / 2, p2)
+							local cG = Color3.new(0, 1, 0); local cY = Color3.new(1, 1, 0); local cR = Color3.new(1, 0, 0)
+							if mag <= ws then line.Color3 = cG:Lerp(cY, mag / ws)
+							else line.Color3 = cY:Lerp(cR, math.clamp((mag - ws) / ws, 0, 1)) end
+							line.Visible = true
+						else
+							line.Visible = false
+						end
+					end
+					for i = #points, #TrajectoryLines do TrajectoryLines[i].Visible = false end
 				else
-					isHoldingJump = UserInputService:IsKeyDown(Enum.KeyCode.Space) or hum.Jump
+					for _, line in ipairs(TrajectoryLines) do line.Visible = false end
 				end
-				
-				local targetVXZ = targetDir * walkSpeed
-				
-				-- Calculate correct jump force based on game settings
-				local jumpVelocity = 50
-				pcall(function()
-					if hum.UseJumpPower then
-						jumpVelocity = hum.JumpPower
-					else
-						jumpVelocity = math.sqrt(2 * Workspace.Gravity * hum.JumpHeight)
-					end
-				end)
-				
-				-- The exact derived constants from the physics data!
-				local airAccelStep = 0.59584 * (walkSpeed / 16)
-				local groundFactorTarget = 0.625
-				local groundFactorCurrent = 0.375
-				
-				local jumpTimer = 0
-				local currentState = hum:GetState()
-				if currentState == Enum.HumanoidStateType.Freefall or currentState == Enum.HumanoidStateType.Jumping or currentState == Enum.HumanoidStateType.FallingDown then
-					jumpTimer = 15
-				end
-				if v.Y > 10 then
-					jumpTimer = 15
-				end
-				
-				-- Simulate optimized frames into the future
-				for frame = 1, MaxTrajectoryFrames do
-					local hitSomething = false
-					
-					for step = 1, 4 do
-						local currVXZ = Vector3.new(v.X, 0, v.Z)
-						local floorHit = nil
-						
-						if jumpTimer == 0 then
-							floorHit = Workspace:Blockcast(CFrame.new(p) * charRot, floorBox, feetOffset, rayParams)
-						end
-						
-						if floorHit then
-							currVXZ = (currVXZ * groundFactorCurrent) + (targetVXZ * groundFactorTarget)
-							
-							if isHoldingJump then
-								v = Vector3.new(currVXZ.X, jumpVelocity, currVXZ.Z)
-								jumpTimer = 15
-							else
-								local normal = floorHit.Normal
-								v = currVXZ - (currVXZ:Dot(normal) * normal)
-							end
-						else
-							if jumpTimer > 0 then
-								jumpTimer = jumpTimer - 1
-							end
-							
-							local diff = targetVXZ - currVXZ
-							if diff.Magnitude > 0 then
-								local accelStep = math.min(diff.Magnitude, airAccelStep)
-								currVXZ = currVXZ + (diff.Unit * accelStep)
-							end
-							v = Vector3.new(currVXZ.X, v.Y, currVXZ.Z) + (grav * dt240)
-						end
-						
-						local stepVec = v * dt240
-						if stepVec.Magnitude > 0.0001 then
-							local hitCenter = Workspace:Blockcast(CFrame.new(p) * charRot, wallBox, stepVec, rayParams)
-							if hitCenter then
-								p = p + (stepVec.Unit * hitCenter.Distance)
-								hitSomething = true
-								break
-							else
-								p = p + stepVec
-							end
-						end
-					end
-					
-					table.insert(points, p)
-					table.insert(velocities, v)
-					if hitSomething then break end
-					if (not isHoldingJump) and v.Magnitude <= 1 and targetVXZ.Magnitude < 0.5 then break end
-				end
-				
-				local ws = hum.WalkSpeed > 0 and hum.WalkSpeed or 16
-				
-				for i = 1, #points - 1 do
-					local line = TrajectoryLines[i]
-					if not line then
-						line = Instance.new("CylinderHandleAdornment")
-						line.Radius = 0.08
-						line.ZIndex = 5
-						line.AlwaysOnTop = false
-						line.Adornee = Workspace.Terrain
-						line.Parent = TrajectoryFolder
-						TrajectoryLines[i] = line
-					end
-					
-					local p1, p2 = points[i], points[i+1]
-					local length = (p2 - p1).Magnitude
-					local mag = velocities[i].Magnitude
-					
-					if length > 0.001 then
-						line.Height = length
-						line.CFrame = CFrame.lookAt(p1 + (p2 - p1) / 2, p2)
-						
-						local cG = Color3.new(0, 1, 0)
-						local cY = Color3.new(1, 1, 0)
-						local cR = Color3.new(1, 0, 0)
-						
-						if mag <= ws then
-							line.Color3 = cG:Lerp(cY, mag / ws)
-						else
-							line.Color3 = cY:Lerp(cR, math.clamp((mag - ws) / ws, 0, 1))
-						end
-						line.Visible = true
-					else
-						line.Visible = false
-					end
-				end
-				for i = #points, #TrajectoryLines do TrajectoryLines[i].Visible = false end
-			else
-				for _, line in ipairs(TrajectoryLines) do line.Visible = false end
 			end
 		else
 			for _, line in ipairs(TrajectoryLines) do line.Visible = false end
 		end
 		
-		-- 2. TAS FUTURE PATH VISUALIZER
 		if ViewingTAS and ShowTASPathDuringPlayback and ActivePlaybackFrames then
 			local frames = ActivePlaybackFrames
 			local startIdx = CurrentPlaybackIndex
-			local maxFrames = math.min(#frames, startIdx + 1200) -- Show up to 1200 frames (20 seconds) ahead
+			local maxFrames = math.min(#frames, startIdx + 1200) 
 			
 			local lineIndex = 1
 			for i = startIdx, maxFrames - 1 do
-				local p1 = Vector3.new(unpack(frames[i].CF))
-				local p2 = Vector3.new(unpack(frames[i+1].CF))
+				local p1 = Vector3.new(frames[i].CF[1], frames[i].CF[2], frames[i].CF[3])
+				local p2 = Vector3.new(frames[i+1].CF[1], frames[i+1].CF[2], frames[i+1].CF[3])
 				local dist = (p2 - p1).Magnitude
 				
 				if dist > 0.005 then 
 					local line = PathLines[lineIndex]
 					if not line then
 						line = Instance.new("CylinderHandleAdornment")
-						line.Radius = 0.06
-						line.Color3 = Color3.fromRGB(0, 200, 255) -- Cyan Blue
-						line.Transparency = 0.2
-						line.ZIndex = 4
-						line.AlwaysOnTop = false
-						line.Adornee = Workspace.Terrain
-						line.Parent = TrajectoryFolder
+						line.Radius = 0.06; line.Color3 = Color3.fromRGB(0, 200, 255); line.Transparency = 0.2
+						line.ZIndex = 4; line.AlwaysOnTop = false; line.Adornee = Workspace.Terrain; line.Parent = TrajectoryFolder
 						PathLines[lineIndex] = line
 					end
-					
-					line.Height = dist
-					line.CFrame = CFrame.lookAt(p1 + (p2 - p1) / 2, p2)
-					line.Visible = true
+					line.Height = dist; line.CFrame = CFrame.lookAt(p1 + (p2 - p1) / 2, p2); line.Visible = true
 					lineIndex = lineIndex + 1
 				end
 			end
-			
-			for i = lineIndex, #PathLines do
-				PathLines[i].Visible = false
-			end
+			for i = lineIndex, #PathLines do PathLines[i].Visible = false end
 		else
-			for _, line in ipairs(PathLines) do
-				line.Visible = false
-			end
+			for _, line in ipairs(PathLines) do line.Visible = false end
 		end
 	end))
 	
 	table.insert(Connections, RunService.Heartbeat:Connect(function(dt)
 		if not Pause and not ViewingTAS then
-			local now = os.clock()
-			if now - LastRecordTime < (1/60) then return end
-			LastRecordTime = now
-
 			if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then return end
 			if LocalPlayer.Character.Humanoid.Health <= 0 then return end
 
@@ -1213,7 +1330,6 @@ local function Initialize()
 	
 	notify("TAS Recorder Initialized", "TAS")
 	
-	-- IF AUTO-PLAY IS ACTIVATED:
 	if isAuto then
 		task.spawn(function()
 			if not LocalPlayer.Character then LocalPlayer.CharacterAdded:Wait() end
