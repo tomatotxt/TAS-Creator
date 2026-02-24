@@ -1,72 +1,73 @@
 ***
 
-# TAS Recorder Redux
+# TAS Recorder Redux: Kinematic Edition
 
-**TAS Recorder Redux** is a high-precision Tool-Assisted Speedrun (TAS) recording and playback utility for Roblox. Built upon the foundation of the original Tomato/Ali recorder, this version has been completely re-engineered from the ground up. It abandons hacky exploit-dependent hooks in favor of native Roblox API integration, resulting in 1:1 animation replication, flawlessly preserved easing curves, procedural physics retention, and advanced map-debugging tools.
+**TAS Recorder Redux** is a high-precision Tool-Assisted Speedrun (TAS) recording and playback utility for Roblox. Built upon the foundation of the original Tomato/Ali recorder, this version has been completely re-engineered from the ground up. It abandons complex and fragile animation hooking in favor of a **purely kinematic physics engine**, resulting in absolute 1:1 positional replication, real-time trajectory visualization, exact camera tracking, and cinematic playback smoothing.
 
 !(https://img.shields.io/badge/Language-Lua-blue.svg) !(https://img.shields.io/badge/Platform-Roblox-red.svg) !(https://img.shields.io/badge/Status-Active-green.svg)
 
 ## 🚀 Key Improvements & Technical Deep-Dive
 
-This is not a UI reskin; the core recording and playback logic has been completely rewritten for maximum stability, accuracy, and executor compatibility.
+This is a complete architectural rewrite. The core recording and playback logic has been optimized for maximum stability, visual accuracy, and cinematic rendering.
 
-### 1. Executor-Agnostic Animation Tracking (No more `getsenv`)
-*   **The Old Flaw:** Previous versions used `getsenv()` to hook the game's default `Animate` script. This was heavily flawed because Luau optimizations often inline function calls, bypassing the hook entirely. Furthermore, it made the script incompatible with many modern executors.
-*   **The New Engine:** The script now natively queries the Humanoid's `Animator` object using `GetPlayingAnimationTracks()` every Heartbeat. It captures the exact `TimePosition`, `WeightCurrent`, `Speed`, and `Priority` of every running track.
-*   **Educational Note - Track Instance Collisions:** In Roblox, the engine frequently plays multiple overlapping tracks of the *exact same AnimationId* to cross-fade (e.g., blending two jump cycles). Previous TAS scripts grouped animations by ID, which mathematically smashed these overlapping tracks together, destroying the fade. **Fix:** The new script assigns a Unique Identifier (uID) to every animation instance in memory using a weak-keyed metatable cache, ensuring identical overlapping tracks are recorded and played back independently.
+### 1. Pure Kinematic State Replication (No more Animation Hooks)
+*   **The Old Flaw:** Previous versions attempted to track and replay the Humanoid's `Animator` tracks. This caused severe desyncs on complex games with overlapping tracks, and frequently broke across different executors.
+*   **The New Engine:** The script now entirely ignores animations. Instead, it records the exact `CFrame`, `Velocity`, `RotVelocity`, and numerical `HumanoidStateType` (e.g., Freefall, Jumping) every frame. During playback, it unanchors the root, applies spherical linear interpolation (Lerp) to the CFrame, and exactly injects the rotational/linear velocity into all character limbs. This forces the Roblox engine to naturally reconstruct the visual state perfectly without relying on fragile animation data.
 
-### 2. Preserving Native Easing Curves & Speeds
-*   **The Old Flaw:** The old playback loop mathematically forced `TimePosition` forward linearly every frame. This ruined Roblox's natural cubic easing curves, making animations (like swimming or jumping) look stiff, shaky, and prematurely cut off.
-*   **The New Engine:** The script now records the dynamic `Speed` of the animation. During playback, instead of forcing frames, it applies the exact `Weight` and `Speed` and *lets the Roblox C++ engine play the animation naturally*. It only steps in to manually snap the `TimePosition` if a lag spike causes the engine to drift out of sync by more than `0.15` seconds.
+### 2. Matrix Orthogonality & Anti-Drift Math
+*   **The Old Flaw:** Blindly saving and interpolating CFrame rotation matrices causes floating-point errors over time, eventually breaking matrix orthogonality and causing "micro-drift" (shaky/tilting characters).
+*   **The New Engine:** The engine now breaks down the CFrame into components and applies a precision `round()` function to the 10,000th decimal *only* on the spatial coordinates (X, Y, Z). It intentionally leaves the rotation matrix completely unrounded, permanently preventing matrix corruption and positional drift while keeping JSON sizes optimized.
 
-### 3. Procedural Physics & Unanchored Replication
-*   **The Old Flaw:** Using `Anchored = true` during playback freezes the character for other players, breaking visual replication in multiplayer. Forcing the `Physics` state machine stops the engine from applying procedural joint sway (gravity IK on the arms/torso).
-*   **The New Engine:** The character remains **Unanchored**. To prevent gravity or momentum from ruining the TAS path, the script forces `Velocity = Vector3.zero` while interpolating the `CFrame`. Because the script allows the Humanoid to naturally enter the `Freefall` state, the engine's built-in procedural arm sway is perfectly retained during jumps.
+### 3. Real-Time Trajectory & Path Visualizers
+*   **Velocity Trajectory:** Includes a built-in predictive visualizer (Keybind: `L`). It utilizes `Workspace:Blockcast` to calculate Roblox's internal gravity (`-196.2`), WalkSpeed, and air-acceleration to draw dynamic, color-coded trajectory lines up to 150 frames into the future. 
+*   **Playback Pathing:** During playback, the engine draws a Cyan trail predicting the future path of the speedrun up to 20 seconds ahead.
 
-### 4. Advanced Debug View (Checkerboard Map Parsing)
+### 4. Cinematic "Extreme Smoothing" & Camera Tracking
+*   **Playback Camera:** The script now continuously logs `Workspace.CurrentCamera.CFrame` and seamlessly mimics the exact player camera movements during playback.
+*   **Extreme Smoothing Mode:** A headless global variable (`ExtremeSmoothing`) allows you to severely downsample the recorded JSON data to a target FPS (e.g., 24). The engine will then perfectly interpolate between these stretched gaps, creating an ultra-smooth cinematic playback ideal for video rendering (Note: May cause visual wall-clipping).
+
+### 5. Graceful Death Handling & Input Scrubbing
+*   **Smart Rewind:** Frame-by-frame advancing/rewinding (`R` and `F`) now uses unique execution IDs, allowing you to hold the keys down to smoothly scrub through time without overlapping loop crashes.
+*   **Auto-Recovery:** If your character dies while recording, the script immediately pauses, waits for you to respawn, and automatically teleports you to your last saved frame/savestate so you can continue the run seamlessly.
+
+### 6. Advanced Debug View (Checkerboard Map Parsing)
 A built-in map visualizer (Keybind: `V`) engineered to help route creation and hitbox analysis:
 *   **Ghosting:** `CanCollide = false` parts are made 90% transparent.
-*   **Checkerboard Borders:** To easily distinguish overlapping hitboxes, parts are assigned slightly randomized shades.
-    *   **Default Hitboxes:** Random shades of Grey.
-    *   **Thin Walls:** Walls `<= 1` stud thick are highlighted in random shades of **Cyan** (invaluable for finding wallbangs/clips).
-    *   **TouchInterests:** Killbricks and Teleporters are highlighted in random shades of **Bright Red**.
-
-### 5. Loop "Backwards Interpolation" Fix
-*   **The Math Bug:** When a looping animation finishes, its `TimePosition` resets from `Length` (e.g., 2.5s) back to `0.0s`. Standard Lerp algorithms attempt to smoothly transition backwards from 2.5 down to 0.0, causing a 1-frame violent reverse jitter.
-*   **The Fix:** The script detects if `Frame B`'s time is less than `Frame A`'s time. If so, it calculates the remaining distance to the track's `Length` and wraps it seamlessly forward, completely eliminating playback jitter.
+*   **Checkerboard Borders:** To easily distinguish overlapping hitboxes, parts are assigned slightly randomized grey shades.
+*   **Thin Walls:** Walls `< 1` stud thick are highlighted in random hues (excluding cyan) so you can easily spot clip/wallbang setups.
+*   **TouchInterests:** Killbricks and Teleporters are immediately flagged in bright, randomized shades of **Red**.
 
 ---
 
 ## 🛠️ Requirements
 
 *   A standard Roblox Executor.
-*   **NO high-level exploits required.** Because this version natively reads the `Animator` object, it no longer requires `getsenv()`, `hookmetamethod`, or unsafe environment manipulation. It is universally compatible.
+*   **NO high-level exploits required.** Because this version natively reads simple physics properties (CFrame/Velocity) and utilizes standard UI functionality, it is universally compatible with almost any executor.
 
 ## 🎮 Controls & Keybinds
 
 | Key | Action | Description |
 | :--- | :--- | :--- |
-| **Caps Lock** | Pause / Unpause | Toggles recording state. |
-| **1** | Add Savestate | Creates a checkpoint at current frame. |
+| **Caps Lock** | Pause / Unpause | Toggles recording state. Anchors/Unanchors you. |
+| **1** | Add Savestate | Creates a checkpoint at the current frame. |
 | **2** | Remove Savestate | Deletes the most recent checkpoint. |
-| **3** | Enter Savestate | Loads the last savestate into the active buffer, allowing you to edit/continue from it. |
-| **8** | Load Last Savestate | Teleports back to the last checkpoint (Visual only). |
-| **R** | Frame Back | Rewind 1 frame (Hold to scroll). |
-| **F** | Frame Forward | Advance 1 frame (Hold to scroll). |
-| **4** | Go Back | Fast rewind (Scrubbing). |
-| **5** | Go Forward | Fast forward (Scrubbing). |
-| **6** | Save Run | Saves the current run to `workspace/TAS_Recorder/`. |
+| **3** | Enter Savestate | Loads the last savestate into the active buffer (Edit Mode). |
+| **8** | Load Last Savestate | Teleports back to the last checkpoint. |
+| **R** | -1 Frame | Rewind 1 frame (Hold to scrub smoothly). |
+| **F** | +1 Frame | Advance 1 frame (Hold to scrub smoothly). |
+| **6** | Save JSON | Saves the current run data to `workspace/TAS_Recorder/`. |
 | **0** | View TAS | Plays back the entire recorded run. |
-| **-** | Load Run | Loads a file matching the text box name. |
-| **V** | **Debug View** | Toggles the map visualizer (Hitboxes/Triggers/Thin Walls). |
+| **-** | Load JSON | Loads a `.json` file matching the text box name. |
+| **L** | Toggle Velocity Vis | Toggles the predictive trajectory blockcast visualizer. |
+| **V** | Debug View | Toggles the map visualizer (Hitboxes/Triggers/Thin Walls). |
 | **C** | Toggle Collision | Toggles `CanCollide` on the part under your mouse. |
-| **Del** | Stop Script | Fully disconnects the script, restores physics, and cleans up tracks. |
+| **Del** | Stop Script | Fully disconnects the script, restores physics, and deletes GUI. |
 
 ---
 
-## 💾 Saving & Loading
+## 💾 Saving, Loading & Headless Mode
 
-The script handles files in the `TAS_Recorder` folder. Data is heavily compressed into raw arrays (e.g., ``) to reduce JSON file sizes by ~80%.
+The script handles files in the `TAS_Recorder` folder. Data is efficiently saved to standard `.json` formats. 
 
 1.  **Saving:**
     *   Type a name in the text box (e.g., `Speedrun_1`).
@@ -75,7 +76,10 @@ The script handles files in the `TAS_Recorder` folder. Data is heavily compresse
 2.  **Loading:**
     *   Type the name in the text box.
     *   Press **-**.
-    *   The script automatically pauses and teleports you to the last frame.
+    *   The script automatically pauses, parses the JSON, and teleports you to the starting frame.
+3.  **Auto Load & Play (Headless Mode):**
+    *   At the top of the script code, change `getgenv().AutoLoadAndPlayFile = "Speedrun_1"`.
+    *   When executed, the script skips generating the GUI, automatically parses the file, and plays the TAS instantly for clean video recording.
 
 ---
 
@@ -83,7 +87,7 @@ The script handles files in the `TAS_Recorder` folder. Data is heavily compresse
 
 *   **Original Concept:** Tomato -> https://scriptblox.com/u/Tomato
 *   **Modifications:** Ali -> https://scriptblox.com/u/Ali_
-*   **Enhanced Engine & Math Corrections: [Tomato -> AI Assisted] **
+*   **Enhanced Engine & Kinematic Math: [Tomato -> AI Assisted] **
 
 ---
 
